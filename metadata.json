@@ -1,0 +1,6 @@
+{
+  "name": "FitAI – Personal Fitness & Nutrition Coach",
+  "description": "AI-powered personal fitness, nutrition, workout, hydration, sleep, and lifestyle management app with real Gemini AI coaching and nutrition vision.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
