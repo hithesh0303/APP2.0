@@ -45,6 +45,11 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 export const api = {
   // Auth
+  quickSession: (body: { name?: string; email?: string } = {}) =>
+    request<{ token: string; user: User; profile: UserProfile }>('/api/auth/quick-session', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   register: (body: { name: string; email: string; password: string }) =>
     request<{ token: string; user: User; profile: UserProfile }>('/api/auth/register', {
       method: 'POST',
@@ -176,6 +181,7 @@ export const api = {
 
   // Meal Plans & Recipes & Groceries
   getMealPlans: () => request<MealPlanDay[]>('/api/mealplans'),
+  generateAiMealPlan: () => request<MealPlanDay[]>('/api/mealplans/generate-ai', { method: 'POST' }),
   regenerateDayMeal: (day: string, mealType: string) =>
     request<MealPlanDay[]>('/api/mealplans/regenerate-day', {
       method: 'POST',
@@ -208,6 +214,11 @@ export const api = {
   createReminder: (rem: Partial<ReminderItem>) =>
     request<ReminderItem>('/api/reminders', {
       method: 'POST',
+      body: JSON.stringify(rem),
+    }),
+  updateReminder: (id: string, rem: Partial<ReminderItem>) =>
+    request<ReminderItem>(`/api/reminders/${id}`, {
+      method: 'PUT',
       body: JSON.stringify(rem),
     }),
   toggleReminder: (id: string) =>
@@ -254,7 +265,7 @@ export const api = {
       body: JSON.stringify({ days }),
     }),
   chatCoach: (message: string, history: any[] = []) =>
-    request<{ reply: string }>('/api/ai/chat', {
+    request<{ reply?: string; content?: string; role?: string; timestamp?: string }>('/api/ai/chat', {
       method: 'POST',
       body: JSON.stringify({ message, history }),
     }),

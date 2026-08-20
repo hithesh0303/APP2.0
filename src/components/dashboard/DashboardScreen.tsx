@@ -143,6 +143,19 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
+
+        <div className="pt-1 flex items-center justify-between border-t border-emerald-500/40 relative z-10">
+          <span className="text-[11px] text-emerald-200 font-medium">Have questions on your workout, meals, or macros?</span>
+          <button
+            type="button"
+            id="btn-launch-fitai-coach"
+            onClick={() => onNavigate('coach')}
+            className="py-1.5 px-3.5 bg-white text-emerald-800 hover:bg-emerald-50 rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-transform active:scale-95 shadow-sm shrink-0"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Launch FitAI Coach</span>
+          </button>
+        </div>
       </div>
 
       {/* Main Calories & Macros Adherence Hub */}

@@ -67,7 +67,7 @@ export const CoachChatScreen: React.FC = () => {
 
       const assistantMsg: ChatMsg = {
         role: 'assistant',
-        content: res.reply || "I'm analyzing your fitness progress. Let me know if you'd like more details.",
+        content: res.content || res.reply || "I'm analyzing your fitness progress. Let me know if you'd like more details.",
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
 

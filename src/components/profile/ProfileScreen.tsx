@@ -16,32 +16,59 @@ import {
   Shield,
   CheckCircle2,
   Sparkles,
-  Calculator
+  Calculator,
+  Share2,
+  UserPlus,
+  Activity
 } from 'lucide-react';
+import { HealthIntegrationModal } from './HealthIntegrationModal';
 
 interface ProfileScreenProps {
   onOpenReminders: () => void;
+  onOpenAuth?: () => void;
 }
 
-export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onOpenReminders }) => {
+export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onOpenReminders, onOpenAuth }) => {
   const { user, profile, updateProfile, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { sendLocalNotification } = useNotifications();
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  const handleShare = async () => {
+    const shareUrl = window.location.href;
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'FitAI – Personal Fitness & Nutrition Coach',
+          text: 'Check out FitAI for AI food scanning, personalized meal plans, and workout routines!',
+          url: shareUrl,
+        });
+      } catch (err) {
+        // Ignored if user dismissed share sheet
+      }
+    } else {
+      navigator.clipboard.writeText(shareUrl);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 3000);
+      sendLocalNotification('Link Copied!', 'App link copied to clipboard. Share it with your friends!', 'insight');
+    }
+  };
 
   // Profile Form state
   const [age, setAge] = useState(profile?.age || 26);
   const [gender, setGender] = useState(profile?.gender || 'male');
-  const [heightCm, setHeightCm] = useState(profile?.heightCm || 175);
-  const [weight, setWeight] = useState(profile?.weight || 70);
-  const [targetWeight, setTargetWeight] = useState(profile?.targetWeight || 65);
-  const [activityLevel, setActivityLevel] = useState(profile?.activityLevel || 'moderately_active');
-  const [goal, setGoal] = useState(profile?.goal || 'fat_loss');
-  const [dietaryPreference, setDietaryPreference] = useState(profile?.dietaryPreference || 'vegetarian');
-  const [budgetTier, setBudgetTier] = useState(profile?.budgetTier || 'low');
+  const [heightCm, setHeightCm] = useState(profile?.height || (profile as any)?.heightCm || 175);
+  const [weight, setWeight] = useState(profile?.weight || 72);
+  const [targetWeight, setTargetWeight] = useState(profile?.targetWeight || 68);
+  const [activityLevel, setActivityLevel] = useState(profile?.activityLevel || 'moderate');
+  const [goal, setGoal] = useState(profile?.fitnessGoal || (profile as any)?.goal || 'lose_fat');
+  const [dietaryPreference, setDietaryPreference] = useState(profile?.diet || (profile as any)?.dietaryPreference || 'vegetarian');
+  const [dailyBudget, setDailyBudget] = useState(profile?.dailyBudget || 250);
 
   const [saving, setSaving] = useState(false);
   const [adminStats, setAdminStats] = useState<any>(null);
   const [showAdmin, setShowAdmin] = useState(false);
+  const [isHealthModalOpen, setIsHealthModalOpen] = useState(false);
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -50,13 +77,14 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onOpenReminders })
       await updateProfile({
         age: Number(age),
         gender,
-        heightCm: Number(heightCm),
+        height: Number(heightCm),
         weight: Number(weight),
         targetWeight: Number(targetWeight),
         activityLevel,
-        goal,
-        dietaryPreference,
-        budgetTier,
+        fitnessGoal: goal as any,
+        diet: dietaryPreference as any,
+        dailyBudget: Number(dailyBudget),
+        onboardingCompleted: true,
       });
 
       sendLocalNotification(
@@ -93,12 +121,32 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onOpenReminders })
             <h2 className="text-lg font-bold text-neutral-900 dark:text-neutral-100">{user?.name}</h2>
             <p className="text-xs text-neutral-500">{user?.email}</p>
             <div className="inline-flex items-center space-x-1 mt-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-0.5 rounded-lg">
-              <span>Goal: {profile?.goal?.replace('_', ' ')}</span>
+              <span>Goal: {(profile?.fitnessGoal || (profile as any)?.goal || 'lose_fat').replace('_', ' ')}</span>
             </div>
           </div>
         </div>
 
         <div className="flex items-center space-x-2">
+          <button
+            type="button"
+            onClick={handleShare}
+            className="p-2.5 bg-emerald-50 dark:bg-emerald-950/50 hover:bg-emerald-100 text-emerald-700 dark:text-emerald-300 rounded-xl transition-colors flex items-center space-x-1.5 text-xs font-semibold"
+            title="Share App with Friends"
+          >
+            <Share2 className="w-4 h-4" />
+            <span className="hidden sm:inline">{copiedLink ? 'Copied!' : 'Share App'}</span>
+          </button>
+          {onOpenAuth && (
+            <button
+              type="button"
+              onClick={onOpenAuth}
+              className="p-2.5 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded-xl transition-colors text-neutral-700 dark:text-neutral-300 flex items-center space-x-1 text-xs font-semibold"
+              title="Switch or Register Account"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span className="hidden sm:inline">Switch</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={toggleTheme}
@@ -278,13 +326,13 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onOpenReminders })
         </div>
       </form>
 
-      {/* Routine Reminders & Admin Controls */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      {/* Routine Reminders, Health Connect & Admin Controls */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="p-5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl shadow-xs space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
               <Bell className="w-4 h-4 text-emerald-600" />
-              <h3 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Schedule & Habit Reminders</h3>
+              <h3 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Habit Reminders</h3>
             </div>
             <button
               type="button"
@@ -302,8 +350,27 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onOpenReminders })
         <div className="p-5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl shadow-xs space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
+              <Activity className="w-4 h-4 text-emerald-600" />
+              <h3 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Health Sync</h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsHealthModalOpen(true)}
+              className="py-1.5 px-3 bg-neutral-100 dark:bg-neutral-800 hover:bg-emerald-50 text-emerald-600 rounded-xl text-xs font-semibold"
+            >
+              Connect
+            </button>
+          </div>
+          <p className="text-xs text-neutral-500">
+            Link Apple Health, Android Health Connect, or Google Fit for automatic step & sleep imports.
+          </p>
+        </div>
+
+        <div className="p-5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-3xl shadow-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
               <Shield className="w-4 h-4 text-indigo-500" />
-              <h3 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Database & System Stats</h3>
+              <h3 className="text-xs font-bold text-neutral-900 dark:text-neutral-100">Diagnostics</h3>
             </div>
             <button
               type="button"
@@ -318,6 +385,12 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onOpenReminders })
           </p>
         </div>
       </div>
+
+      {/* Health Integration Modal */}
+      <HealthIntegrationModal
+        isOpen={isHealthModalOpen}
+        onClose={() => setIsHealthModalOpen(false)}
+      />
 
       {/* Admin Stats Modal Preview */}
       {showAdmin && adminStats && (

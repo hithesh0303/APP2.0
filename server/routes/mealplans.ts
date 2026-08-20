@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db, MealPlanDay, RecipeItem, GroceryItem } from '../db.js';
 import { authenticateToken, AuthenticatedRequest } from '../auth.js';
+import { generateAiMealPlan, generateWhatShouldIEat } from '../gemini.js';
 
 const router = Router();
 
@@ -84,8 +85,36 @@ router.get('/', authenticateToken, (req: AuthenticatedRequest, res) => {
   return res.json(plans);
 });
 
+// POST /api/mealplans/generate-ai (Full personalized AI meal plan generation)
+router.post('/generate-ai', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const userId = req.user!.id;
+    const profile = db.get().profiles.find(p => p.userId === userId);
+
+    const generated = await generateAiMealPlan({
+      goal: profile?.fitnessGoal || 'lose_fat',
+      diet: profile?.diet || 'vegetarian',
+      foodPreferences: profile?.foodPreferences || ['Indian'],
+      allergies: profile?.allergies || [],
+      dislikedFoods: profile?.dislikedFoods || [],
+      dailyCalorieTarget: profile?.dailyCalorieTarget || 2000,
+      proteinTarget: profile?.proteinTarget || 120,
+      dailyBudget: profile?.dailyBudget || 250,
+      daysCount: 7,
+    });
+
+    db.get().mealPlans[userId] = generated;
+    db.save();
+
+    return res.json(generated);
+  } catch (err: any) {
+    console.error('AI meal plan generation error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to generate AI meal plan' });
+  }
+});
+
 // POST /api/mealplans/regenerate-day
-router.post('/regenerate-day', authenticateToken, (req: AuthenticatedRequest, res) => {
+router.post('/regenerate-day', authenticateToken, async (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
   const { day, mealType } = req.body;
 
@@ -96,37 +125,67 @@ router.post('/regenerate-day', authenticateToken, (req: AuthenticatedRequest, re
   }
 
   const targetDay = plans.find(d => d.day.toLowerCase() === String(day).toLowerCase());
+  const profile = db.get().profiles.find(p => p.userId === userId);
+
   if (targetDay && mealType) {
-    if (mealType === 'breakfast') {
-      targetDay.breakfast = {
-        name: 'Vegetable Poha with Roasted Peanuts & Lemon',
-        calories: 320,
-        protein: 9,
-        carbs: 52,
-        fat: 8,
-        costEstimate: 25,
-        recipe: 'Rinse flattened rice, saute with mustard seeds, curry leaves, onions, green chilies, and crunchy peanuts.',
-      };
-    } else if (mealType === 'lunch') {
-      targetDay.lunch = {
-        name: 'Palak Paneer / Tofu with 2 Phulkas & Cucumber Raita',
-        calories: 420,
-        protein: 22,
-        carbs: 45,
-        fat: 16,
-        costEstimate: 65,
-        recipe: 'Blanch spinach into puree, simmer with spiced paneer cubes and serve with soft hot phulkas.',
-      };
-    } else if (mealType === 'dinner') {
-      targetDay.dinner = {
-        name: 'High-Protein Soy Chunks Curry with 2 Rotis',
-        calories: 380,
-        protein: 30,
-        carbs: 42,
-        fat: 9,
-        costEstimate: 40,
-        recipe: 'Boil soy chunks, squeeze water, simmer in onion-tomato gravy with turmeric and garam masala.',
-      };
+    try {
+      const suggestions = await generateWhatShouldIEat({
+        goal: profile?.fitnessGoal || 'lose_fat',
+        diet: profile?.diet || 'vegetarian',
+        foodPreferences: profile?.foodPreferences || ['Indian'],
+        allergies: profile?.allergies || [],
+        dislikedFoods: profile?.dislikedFoods || [],
+        remainingCalories: Math.round((profile?.dailyCalorieTarget || 2000) * 0.3),
+        remainingProtein: Math.round((profile?.proteinTarget || 120) * 0.3),
+        dailyBudget: profile?.dailyBudget || 250,
+        timeOfDay: mealType,
+      });
+
+      if (suggestions && suggestions[0]) {
+        const top = suggestions[0];
+        (targetDay as any)[mealType] = {
+          name: top.name,
+          calories: top.calories,
+          protein: top.protein,
+          carbs: top.carbs,
+          fat: top.fat,
+          costEstimate: top.estimatedCost,
+          recipe: top.recipeInstructions.join(' '),
+        };
+      }
+    } catch {
+      // Fallback
+      if (mealType === 'breakfast') {
+        targetDay.breakfast = {
+          name: 'Vegetable Poha with Roasted Peanuts & Lemon',
+          calories: 320,
+          protein: 9,
+          carbs: 52,
+          fat: 8,
+          costEstimate: 25,
+          recipe: 'Rinse flattened rice, saute with mustard seeds, curry leaves, onions, green chilies, and crunchy peanuts.',
+        };
+      } else if (mealType === 'lunch') {
+        targetDay.lunch = {
+          name: 'Palak Paneer / Tofu with 2 Phulkas & Cucumber Raita',
+          calories: 420,
+          protein: 22,
+          carbs: 45,
+          fat: 16,
+          costEstimate: 65,
+          recipe: 'Blanch spinach into puree, simmer with spiced paneer cubes and serve with soft hot phulkas.',
+        };
+      } else if (mealType === 'dinner') {
+        targetDay.dinner = {
+          name: 'High-Protein Soy Chunks Curry with 2 Rotis',
+          calories: 380,
+          protein: 30,
+          carbs: 42,
+          fat: 9,
+          costEstimate: 40,
+          recipe: 'Boil soy chunks, squeeze water, simmer in onion-tomato gravy with turmeric and garam masala.',
+        };
+      }
     }
   }
 
@@ -153,22 +212,22 @@ router.post('/recipes', authenticateToken, (req: AuthenticatedRequest, res) => {
   }
 
   const newRecipe: RecipeItem = {
-    id: `recipe_${Date.now()}`,
+    id: `recipe_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
     userId,
-    title: title.trim(),
+    title: String(title).trim(),
     description: description || 'Delicious customized recipe',
     ingredients: Array.isArray(ingredients) ? ingredients : [ingredients],
     instructions: Array.isArray(instructions) ? instructions : [instructions],
-    calories: Number(calories) || 300,
-    protein: Number(protein) || 15,
+    calories: Number(calories) || 350,
+    protein: Number(protein) || 20,
     carbs: Number(carbs) || 35,
-    fat: Number(fat) || 8,
-    prepTimeMinutes: Number(prepTimeMinutes) || 15,
-    costEstimate: Number(costEstimate) || 40,
+    fat: Number(fat) || 10,
+    prepTimeMinutes: Number(prepTimeMinutes) || 20,
+    costEstimate: Number(costEstimate) || 45,
     tags: Array.isArray(tags) ? tags : ['FitAI Custom'],
   };
 
-  db.get().recipes.push(newRecipe);
+  db.get().recipes.unshift(newRecipe);
   db.save();
 
   return res.status(201).json(newRecipe);
@@ -181,49 +240,47 @@ router.get('/grocery', authenticateToken, (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
   let items = db.get().groceryLists.filter(g => g.userId === userId);
 
-  // If empty, generate standard healthy pantry grocery list
-  if (items.length === 0) {
+  if (!items || items.length === 0) {
     const defaultGroceries: GroceryItem[] = [
-      { id: `gro_${Date.now()}_1`, userId, category: 'Protein', name: 'Eggs / Fresh Paneer / Tofu', quantity: '500g / 1 dozen', estimatedCost: 120, purchased: false },
-      { id: `gro_${Date.now()}_2`, userId, category: 'Protein', name: 'Yellow Moong & Masoor Dal', quantity: '1 kg', estimatedCost: 140, purchased: false },
-      { id: `gro_${Date.now()}_3`, userId, category: 'Grains', name: 'Rolled Oats & Whole Wheat Atta', quantity: '1 kg each', estimatedCost: 110, purchased: false },
-      { id: `gro_${Date.now()}_4`, userId, category: 'Vegetables', name: 'Spinach, Tomatoes, Cucumbers, Onions', quantity: 'Assorted (2 kg)', estimatedCost: 90, purchased: false },
-      { id: `gro_${Date.now()}_5`, userId, category: 'Fruits', name: 'Bananas & Seasonal Apples', quantity: '1 kg', estimatedCost: 90, purchased: false },
-      { id: `gro_${Date.now()}_6`, userId, category: 'Nuts/Seeds', name: 'Raw Almonds & Chia Seeds', quantity: '250g', estimatedCost: 160, purchased: false },
-      { id: `gro_${Date.now()}_7`, userId, category: 'Dairy', name: 'Low Fat Fresh Curd / Dahi', quantity: '1 kg', estimatedCost: 75, purchased: false },
+      { id: `groc_${Date.now()}_1`, userId, category: 'Protein', name: 'Paneer / Tofu', quantity: '500g', estimatedCost: 160, purchased: false },
+      { id: `groc_${Date.now()}_2`, userId, category: 'Grains', name: 'Rolled Oats & Brown Rice', quantity: '1 kg', estimatedCost: 180, purchased: true },
+      { id: `groc_${Date.now()}_3`, userId, category: 'Vegetables', name: 'Spinach, Cucumbers & Tomatoes', quantity: '1.5 kg', estimatedCost: 90, purchased: false },
+      { id: `groc_${Date.now()}_4`, userId, category: 'Nuts/Seeds', name: 'Almonds & Chia Seeds', quantity: '250g', estimatedCost: 240, purchased: false },
+      { id: `groc_${Date.now()}_5`, userId, category: 'Dairy', name: 'Low-fat Curd / Greek Yogurt', quantity: '400g', estimatedCost: 75, purchased: false },
     ];
     db.get().groceryLists.push(...defaultGroceries);
     db.save();
     items = defaultGroceries;
   }
 
-  const totalBudget = items.reduce((sum, item) => sum + item.estimatedCost, 0);
-  const purchasedBudget = items.filter(i => i.purchased).reduce((sum, item) => sum + item.estimatedCost, 0);
+  const totalBudget = items.reduce((sum, item) => sum + (item.estimatedCost || 0), 0);
+  const purchasedBudget = items.filter(i => i.purchased).reduce((sum, item) => sum + (item.estimatedCost || 0), 0);
+  const pendingBudget = totalBudget - purchasedBudget;
 
   return res.json({
     items,
     totalBudget,
     purchasedBudget,
-    pendingBudget: totalBudget - purchasedBudget,
+    pendingBudget,
   });
 });
 
-// POST /api/mealplans/grocery (Add grocery item)
+// POST /api/mealplans/grocery
 router.post('/grocery', authenticateToken, (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
-  const { name, category, quantity, estimatedCost } = req.body;
+  const { category, name, quantity, estimatedCost } = req.body;
 
   if (!name) {
     return res.status(400).json({ error: 'Item name is required' });
   }
 
   const newItem: GroceryItem = {
-    id: `gro_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+    id: `groc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
     userId,
-    name: name.trim(),
     category: category || 'Other',
+    name: String(name).trim(),
     quantity: quantity || '1 unit',
-    estimatedCost: Number(estimatedCost) || 30,
+    estimatedCost: Number(estimatedCost) || 50,
     purchased: false,
   };
 
@@ -236,9 +293,10 @@ router.post('/grocery', authenticateToken, (req: AuthenticatedRequest, res) => {
 // PUT /api/mealplans/grocery/:id/toggle
 router.put('/grocery/:id/toggle', authenticateToken, (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
-  const itemId = req.params.id;
+  const id = req.params.id;
 
-  const item = db.get().groceryLists.find(g => g.id === itemId && g.userId === userId);
+  const item = db.get().groceryLists.find(i => i.id === id && i.userId === userId);
+
   if (!item) {
     return res.status(404).json({ error: 'Grocery item not found' });
   }
@@ -252,9 +310,10 @@ router.put('/grocery/:id/toggle', authenticateToken, (req: AuthenticatedRequest,
 // DELETE /api/mealplans/grocery/:id
 router.delete('/grocery/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
-  const itemId = req.params.id;
+  const id = req.params.id;
 
-  const index = db.get().groceryLists.findIndex(g => g.id === itemId && g.userId === userId);
+  const index = db.get().groceryLists.findIndex(i => i.id === id && i.userId === userId);
+
   if (index === -1) {
     return res.status(404).json({ error: 'Grocery item not found' });
   }

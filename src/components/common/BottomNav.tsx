@@ -1,20 +1,34 @@
 import React from 'react';
-import { Home, Utensils, Dumbbell, TrendingUp, Sparkles } from 'lucide-react';
+import { Home, Utensils, Dumbbell, TrendingUp, Sparkles, User } from 'lucide-react';
 
-export type TabType = 'home' | 'food' | 'workout' | 'progress' | 'aicoach';
+export type TabType = 'dashboard' | 'food' | 'workout' | 'coach' | 'progress' | 'profile';
 
 interface BottomNavProps {
-  currentTab: TabType;
-  onChangeTab: (tab: TabType) => void;
+  activeTab?: TabType | string;
+  currentTab?: TabType | string;
+  onTabChange?: (tab: TabType) => void;
+  onChangeTab?: (tab: TabType) => void;
 }
 
-export const BottomNav: React.FC<BottomNavProps> = ({ currentTab, onChangeTab }) => {
-  const tabs = [
-    { id: 'home' as TabType, label: 'Home', icon: Home },
-    { id: 'food' as TabType, label: 'Food', icon: Utensils },
-    { id: 'workout' as TabType, label: 'Workout', icon: Dumbbell },
-    { id: 'progress' as TabType, label: 'Progress', icon: TrendingUp },
-    { id: 'aicoach' as TabType, label: 'AI Coach', icon: Sparkles, highlight: true },
+export const BottomNav: React.FC<BottomNavProps> = ({
+  activeTab,
+  currentTab,
+  onTabChange,
+  onChangeTab,
+}) => {
+  const current = (activeTab || currentTab || 'dashboard') as TabType;
+  const handleSelect = (tab: TabType) => {
+    if (onTabChange) onTabChange(tab);
+    if (onChangeTab) onChangeTab(tab);
+  };
+
+  const tabs: Array<{ id: TabType; label: string; icon: any; highlight?: boolean }> = [
+    { id: 'dashboard', label: 'Home', icon: Home },
+    { id: 'food', label: 'Food', icon: Utensils },
+    { id: 'workout', label: 'Workout', icon: Dumbbell },
+    { id: 'coach', label: 'AI Coach', icon: Sparkles, highlight: true },
+    { id: 'progress', label: 'Progress', icon: TrendingUp },
+    { id: 'profile', label: 'Profile', icon: User },
   ];
 
   return (
@@ -22,13 +36,13 @@ export const BottomNav: React.FC<BottomNavProps> = ({ currentTab, onChangeTab })
       <div className="max-w-md mx-auto px-2 flex items-center justify-around h-16">
         {tabs.map((tab) => {
           const Icon = tab.icon;
-          const isActive = currentTab === tab.id;
+          const isActive = current === tab.id || (tab.id === 'dashboard' && current === ('home' as any)) || (tab.id === 'coach' && current === ('aicoach' as any));
 
           return (
             <button
               key={tab.id}
               id={`nav-tab-${tab.id}`}
-              onClick={() => onChangeTab(tab.id)}
+              onClick={() => handleSelect(tab.id)}
               className={`flex flex-col items-center justify-center flex-1 py-1.5 px-1 rounded-xl transition-all duration-200 ${
                 isActive
                   ? 'text-emerald-600 dark:text-emerald-400 font-semibold'

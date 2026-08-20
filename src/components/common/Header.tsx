@@ -1,5 +1,5 @@
-import React from 'react';
-import { Bell, Sun, Moon, Sparkles, User as UserIcon, ShieldCheck, Activity, Clock } from 'lucide-react';
+import React, { useState } from 'react';
+import { Bell, Sun, Moon, Sparkles, User as UserIcon, ShieldCheck, Activity, Clock, Share2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useNotifications } from '../../context/NotificationContext';
@@ -23,7 +23,26 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const { user, profile } = useAuth();
   const { resolvedTheme, theme, setTheme } = useTheme();
-  const { unreadCount } = useNotifications();
+  const { unreadCount, sendLocalNotification } = useNotifications();
+  const [copied, setCopied] = useState(false);
+
+  const handleShare = async () => {
+    const url = window.location.href;
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'FitAI – Personal Fitness & Nutrition Coach',
+          text: 'Check out FitAI for AI food scanning, personalized meal plans, and workout routines!',
+          url,
+        });
+      } catch {}
+    } else {
+      navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+      sendLocalNotification('Link Copied! 🔗', 'FitAI link copied. Send it to your friends to join!', 'insight');
+    }
+  };
 
   const toggleTheme = () => {
     if (theme === 'light') setTheme('dark');
@@ -107,6 +126,17 @@ export const Header: React.FC<HeaderProps> = ({
             {unreadCount > 0 && (
               <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-emerald-500 rounded-full animate-pulse ring-2 ring-white dark:ring-neutral-900" />
             )}
+          </button>
+
+          {/* Share App Button */}
+          <button
+            id="btn-header-share"
+            onClick={handleShare}
+            title="Share FitAI with Friends"
+            className="p-2 text-neutral-600 dark:text-neutral-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 hover:text-emerald-600 rounded-xl transition-colors"
+            aria-label="Share App"
+          >
+            <Share2 className="w-4 h-4" />
           </button>
 
           {/* Theme Toggle */}

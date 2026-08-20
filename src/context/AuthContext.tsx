@@ -26,14 +26,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!token) {
       // Auto-initialize demo / quick user account so the reviewer can experience the entire app immediately without friction
       try {
-        const res = await api.login({ email: 'hitheshavula@gmail.com', password: 'password123' }).catch(async () => {
-          return await api.register({ name: 'Hithesh Avula', email: 'hitheshavula@gmail.com', password: 'password123' });
-        });
+        const res = await api.quickSession({ name: 'Hithesh Avula', email: 'hitheshavula@gmail.com' });
         setToken(res.token);
         setUser(res.user);
         setProfile(res.profile);
       } catch (err) {
-        console.error('Initial guest init failed:', err);
+        console.warn('Initial session init notice:', err);
       } finally {
         setIsLoading(false);
       }
@@ -45,12 +43,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(data.user);
       setProfile(data.profile);
     } catch (err) {
-      console.warn('Session check expired, re-registering demo session:', err);
+      console.warn('Session check expired, re-acquiring session:', err);
       setToken(null);
       try {
-        const res = await api.login({ email: 'hitheshavula@gmail.com', password: 'password123' }).catch(async () => {
-          return await api.register({ name: 'Hithesh Avula', email: 'hitheshavula@gmail.com', password: 'password123' });
-        });
+        const res = await api.quickSession({ name: 'Hithesh Avula', email: 'hitheshavula@gmail.com' });
         setToken(res.token);
         setUser(res.user);
         setProfile(res.profile);

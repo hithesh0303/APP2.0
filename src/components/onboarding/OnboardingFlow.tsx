@@ -103,36 +103,40 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     setIsSaving(true);
     try {
       await updateProfile({
-        name,
-        age: Number(age),
-        gender,
-        height: Number(height),
-        weight: Number(weight),
-        targetWeight: Number(targetWeight),
-        activityLevel,
-        fitnessExperience,
-        fitnessGoal,
-        workoutPreference,
-        availableEquipment,
-        availableWorkoutTime: Number(availableWorkoutTime),
-        diet,
-        foodPreferences,
-        allergies,
-        dislikedFoods,
-        dailyBudget: Number(dailyBudget),
-        weeklyBudget: Number(dailyBudget) * 7,
-        sleepTime,
-        wakeTime,
+        name: name || user?.name || 'Athlete',
+        age: Number(age) || 24,
+        gender: gender || 'male',
+        height: Number(height) || 175,
+        weight: Number(weight) || 72,
+        targetWeight: Number(targetWeight) || 68,
+        activityLevel: activityLevel || 'moderate',
+        fitnessExperience: fitnessExperience || 'beginner',
+        fitnessGoal: fitnessGoal || 'lose_fat',
+        workoutPreference: workoutPreference || 'home',
+        availableEquipment: availableEquipment || ['Bodyweight'],
+        availableWorkoutTime: Number(availableWorkoutTime) || 30,
+        diet: diet || 'vegetarian',
+        foodPreferences: foodPreferences || [],
+        allergies: allergies || [],
+        dislikedFoods: dislikedFoods || [],
+        dailyBudget: Number(dailyBudget) || 250,
+        weeklyBudget: (Number(dailyBudget) || 250) * 7,
+        sleepTime: sleepTime || '23:00',
+        wakeTime: wakeTime || '07:00',
         onboardingCompleted: true,
       });
 
-      // Also log initial weight point
-      await api.logWeight(Number(weight), new Date().toISOString().split('T')[0], 'Initial weight at onboarding');
-      onComplete();
+      // Also log initial weight point if possible
+      try {
+        await api.logWeight(Number(weight) || 72, new Date().toISOString().split('T')[0], 'Initial weight at onboarding');
+      } catch (logErr) {
+        console.warn('Initial weight log skipped:', logErr);
+      }
     } catch (err) {
       console.error('Failed to save onboarding:', err);
     } finally {
       setIsSaving(false);
+      onComplete();
     }
   };
 
@@ -145,9 +149,13 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
             <span className="text-xs font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
               Personalized Plan Setup • Step {step} of {totalSteps}
             </span>
-            <span className="text-xs text-neutral-500 dark:text-neutral-400 font-medium">
-              {Math.round((step / totalSteps) * 100)}% Completed
-            </span>
+            <button
+              type="button"
+              onClick={onComplete}
+              className="text-xs text-neutral-500 hover:text-emerald-600 dark:hover:text-emerald-400 font-medium underline"
+            >
+              Skip to Dashboard
+            </button>
           </div>
           <div className="w-full bg-neutral-200 dark:bg-neutral-800 h-1.5 rounded-full overflow-hidden">
             <div

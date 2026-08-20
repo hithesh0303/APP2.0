@@ -1,10 +1,14 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 dotenv.config();
 
+// Centralized model configuration with automatic fallback support for 503/429 spikes
+export const PRIMARY_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.7-flash';
+export const FALLBACK_MODELS = ['gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'];
+
 let aiClient: GoogleGenAI | null = null;
 
-function getAiClient(): GoogleGenAI | null {
+export function getAiClient(): GoogleGenAI | null {
   if (!process.env.GEMINI_API_KEY) {
     return null;
   }
@@ -21,8 +25,75 @@ function getAiClient(): GoogleGenAI | null {
   return aiClient;
 }
 
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Execute a Gemini generateContent request with multi-model fallback and progressive backoff
+ */
+async function callGeminiWithFallback(params: {
+  contents: any;
+  config?: any;
+}) {
+  const ai = getAiClient();
+  if (!ai) {
+    throw new Error('AI service is temporarily unavailable (GEMINI_API_KEY not configured).');
+  }
+
+  const modelQueue = Array.from(new Set([PRIMARY_GEMINI_MODEL, ...FALLBACK_MODELS]));
+  let lastErr: any = null;
+
+  for (let i = 0; i < modelQueue.length; i++) {
+    const model = modelQueue[i];
+    // Up to 2 attempts per model with short delay
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (attempt > 0) {
+          await wait(500 * attempt);
+        }
+        const response = await ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: params.config,
+        });
+        return response;
+      } catch (err: any) {
+        lastErr = err;
+        const isTemporary =
+          err?.status === 'UNAVAILABLE' ||
+          err?.code === 503 ||
+          err?.code === 429 ||
+          err?.code === 404 ||
+          err?.message?.includes('503') ||
+          err?.message?.includes('high demand') ||
+          err?.message?.includes('temporarily') ||
+          err?.message?.includes('RESOURCE_EXHAUSTED') ||
+          err?.message?.includes('NOT_FOUND') ||
+          err?.message?.includes('overloaded');
+
+        if (!isTemporary) {
+          throw err;
+        }
+
+        if (attempt === 0) {
+          // Quick retry before hopping models
+          await wait(600);
+          continue;
+        }
+      }
+    }
+
+    if (i < modelQueue.length - 1) {
+      console.warn(`[FitAI Gemini API] Model ${model} is experiencing high demand. Seamlessly transitioning to fallback model: ${modelQueue[i + 1]}`);
+      await wait(400);
+    }
+  }
+
+  throw lastErr || new Error('AI service is currently experiencing high demand. Please retry in a few moments.');
+}
+
 export interface FoodVisionDetectionResult {
   foodName: string;
+  foodItems?: string[];
   portionEstimate: string;
   calories: number;
   protein: number;
@@ -33,27 +104,15 @@ export interface FoodVisionDetectionResult {
   disclaimer: string;
 }
 
+/**
+ * AI Food Image Analysis using Gemini Vision
+ * Real AI extraction with model fallback
+ */
 export async function detectFoodFromImage(base64Image: string, mimeType: string = 'image/jpeg'): Promise<FoodVisionDetectionResult> {
-  const ai = getAiClient();
-  if (!ai) {
-    // Intelligent baseline calculation if API key is pending
-    return {
-      foodName: 'Nutritious Mixed Meal Bowl',
-      portionEstimate: '1 medium plate (approx. 250g)',
-      calories: 380,
-      protein: 18,
-      carbs: 45,
-      fat: 12,
-      fiber: 5,
-      confidenceScore: 0.85,
-      disclaimer: 'Note: AI image-based nutrition estimates are approximations. Please verify portions and ingredients.'
-    };
-  }
+  const cleanBase64 = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
 
   try {
-    const cleanBase64 = base64Image.replace(/^data:image\/[a-z]+;base64,/, '');
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+    const response = await callGeminiWithFallback({
       contents: {
         parts: [
           {
@@ -63,18 +122,21 @@ export async function detectFoodFromImage(base64Image: string, mimeType: string 
             },
           },
           {
-            text: `Analyze this food image. Identify the primary dish/food items, estimated serving size, and approximate macronutrient breakdown (calories, protein in grams, carbohydrates in grams, fat in grams, fiber in grams).
-Return strictly valid JSON matching this schema:
+            text: `You are an expert clinical dietitian and food recognition AI. Analyze this food image.
+Identify all visible food items/dishes, estimate the serving size, and calculate realistic macronutrient values (calories, protein in grams, carbohydrates in grams, fat in grams, fiber in grams).
+
+Return strictly valid JSON matching this exact schema:
 {
-  "foodName": "Name of primary food or dish",
-  "portionEstimate": "e.g., 2 medium Rotis with 1 bowl Dal",
-  "calories": 350,
-  "protein": 14,
-  "carbs": 50,
-  "fat": 8,
+  "foodName": "Primary name of dish or combined meal",
+  "foodItems": ["Item 1", "Item 2", "Item 3"],
+  "portionEstimate": "e.g., 2 medium Rotis with 1 bowl Dal (approx. 250g)",
+  "calories": 380,
+  "protein": 18,
+  "carbs": 48,
+  "fat": 11,
   "fiber": 6,
   "confidenceScore": 0.92,
-  "disclaimer": "AI image-based nutrition values are estimates. Actual values depend on cooking oils and precise quantities."
+  "disclaimer": "Nutrition values from images are estimates and may vary depending on ingredients, cooking method, oil, and portion size."
 }`
           }
         ]
@@ -87,33 +149,32 @@ Return strictly valid JSON matching this schema:
 
     const text = response.text?.trim() || '{}';
     const parsed = JSON.parse(text);
+
+    if (!parsed.foodName || typeof parsed.calories !== 'number') {
+      throw new Error('Could not reliably identify food in image.');
+    }
+
     return {
-      foodName: parsed.foodName || 'Identified Meal',
+      foodName: String(parsed.foodName),
+      foodItems: Array.isArray(parsed.foodItems) ? parsed.foodItems : [parsed.foodName],
       portionEstimate: parsed.portionEstimate || '1 standard serving',
-      calories: Number(parsed.calories) || 300,
-      protein: Number(parsed.protein) || 12,
-      carbs: Number(parsed.carbs) || 40,
-      fat: Number(parsed.fat) || 8,
-      fiber: Number(parsed.fiber) || 4,
-      confidenceScore: Number(parsed.confidenceScore) || 0.88,
-      disclaimer: parsed.disclaimer || 'AI image estimates are approximations.'
+      calories: Math.max(0, Math.round(Number(parsed.calories) || 0)),
+      protein: Math.max(0, Math.round((Number(parsed.protein) || 0) * 10) / 10),
+      carbs: Math.max(0, Math.round((Number(parsed.carbs) || 0) * 10) / 10),
+      fat: Math.max(0, Math.round((Number(parsed.fat) || 0) * 10) / 10),
+      fiber: Math.max(0, Math.round((Number(parsed.fiber) || 0) * 10) / 10),
+      confidenceScore: Math.min(1, Math.max(0.1, Number(parsed.confidenceScore) || 0.85)),
+      disclaimer: parsed.disclaimer || 'Nutrition values from images are estimates and may vary depending on ingredients, cooking method, oil, and portion size.'
     };
-  } catch (error) {
+  } catch (error: any) {
     console.error('Gemini vision detection error:', error);
-    return {
-      foodName: 'Mixed Meal Platter',
-      portionEstimate: '1 plate (estimated 300g)',
-      calories: 420,
-      protein: 16,
-      carbs: 52,
-      fat: 14,
-      fiber: 6,
-      confidenceScore: 0.8,
-      disclaimer: 'Note: AI image-based nutrition estimates are approximations.'
-    };
+    throw new Error(error.message || 'AI food vision analysis failed. Please provide a clearer image or enter details manually.');
   }
 }
 
+/**
+ * Daily tailored insight and motivation
+ */
 export async function generateDailyInsight(userContext: {
   name: string;
   goal: string;
@@ -127,28 +188,27 @@ export async function generateDailyInsight(userContext: {
   stepsDone: number;
   stepGoal: number;
 }): Promise<string> {
-  const ai = getAiClient();
   const calRemaining = userContext.calorieTarget - userContext.caloriesConsumed;
   const proteinRemaining = userContext.proteinTarget - userContext.proteinConsumed;
   const waterRemaining = Math.max(0, userContext.waterTarget - userContext.waterConsumed);
 
-  if (!ai) {
-    if (proteinRemaining > 20) {
-      return `You are doing well today, ${userContext.name}! You are currently ${proteinRemaining}g short of your protein goal—consider a snack like boiled eggs, roasted paneer, or Greek yogurt before dinner.`;
+  const defaultInsight = () => {
+    if (proteinRemaining > 25) {
+      return `Great momentum, ${userContext.name}! You are ${proteinRemaining}g short of your protein target today—consider a protein-rich snack like boiled eggs, paneer, or Greek yogurt.`;
     }
     if (waterRemaining > 1000) {
-      return `Great momentum on calories today! Make sure to hydrate—you still have ${(waterRemaining / 1000).toFixed(1)}L of water to hit your daily hydration target.`;
+      return `Solid progress today! Make sure to hydrate—you still have ${(waterRemaining / 1000).toFixed(1)}L of water to hit your daily hydration goal.`;
     }
     if (!userContext.workoutDone) {
-      return `You're on track with nutrition! A quick 20-minute bodyweight or dumbbell session will help you hit your daily movement goals.`;
+      return `On track with nutrition, ${userContext.name}! A 20-minute movement or workout session today will keep you progressing toward your ${userContext.goal.replace(/_/g, ' ')} target.`;
     }
-    return `Solid consistency today! All key markers for calories and macros are well aligned with your ${userContext.goal.replace('_', ' ')} goal.`;
-  }
+    return `Keep up the consistency today, ${userContext.name}! You are well aligned with your daily ${userContext.goal.replace(/_/g, ' ')} targets.`;
+  };
 
   try {
     const prompt = `You are FitAI Coach, a supportive, evidence-based fitness & nutrition assistant.
-Provide a concise, motivating, 2-sentence daily insight for ${userContext.name} based on today's logged data:
-- Goal: ${userContext.goal}
+Provide a concise, motivating 2-sentence daily insight for ${userContext.name} based on today's logged data:
+- Goal: ${userContext.goal.replace(/_/g, ' ')}
 - Calorie Target: ${userContext.calorieTarget} kcal | Consumed: ${userContext.caloriesConsumed} kcal (Remaining: ${calRemaining} kcal)
 - Protein Target: ${userContext.proteinTarget}g | Consumed: ${userContext.proteinConsumed}g (Remaining: ${proteinRemaining}g)
 - Water: ${userContext.waterConsumed}ml / ${userContext.waterTarget}ml
@@ -157,24 +217,26 @@ Provide a concise, motivating, 2-sentence daily insight for ${userContext.name} 
 
 Rules:
 1. Keep it strictly under 35 words.
-2. Give one specific, actionable recommendation (e.g. snack idea, hydration tip, or workout encouragement).
+2. Give one specific, actionable recommendation.
 3. Do not make medical claims.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+    const response = await callGeminiWithFallback({
       contents: prompt,
       config: {
         temperature: 0.7,
       }
     });
 
-    return response.text?.trim() || `Keep up the great work today, ${userContext.name}! Stay mindful of your protein target and hydration.`;
+    return response.text?.trim() || defaultInsight();
   } catch (err) {
-    console.error('Gemini daily insight error:', err);
-    return `You're on the right path today, ${userContext.name}! Keep prioritizing clean protein and regular hydration throughout the day.`;
+    console.warn('Gemini daily insight using dynamic calculated fallback:', err);
+    return defaultInsight();
   }
 }
 
+/**
+ * "What Should I Eat?" AI recommendation engine
+ */
 export async function generateWhatShouldIEat(userContext: {
   goal: string;
   diet: string;
@@ -185,6 +247,7 @@ export async function generateWhatShouldIEat(userContext: {
   remainingProtein: number;
   dailyBudget: number;
   timeOfDay: string;
+  recentFoods?: string[];
 }): Promise<Array<{
   name: string;
   ingredients: string[];
@@ -197,94 +260,173 @@ export async function generateWhatShouldIEat(userContext: {
   reason: string;
   recipeInstructions: string[];
 }>> {
-  const ai = getAiClient();
-  const defaultMeals = [
-    {
-      name: 'Paneer / Tofu Bhurji with 2 Multigrain Rotis',
-      ingredients: ['150g Low Fat Paneer / Tofu', '2 Multigrain Rotis', 'Onions, Tomatoes, Green Chillies', '1 tsp Olive Oil / Ghee', 'Turmeric, Cumin, Coriander'],
-      calories: 380,
-      protein: 24,
-      carbs: 38,
-      fat: 12,
-      prepTimeMinutes: 15,
-      estimatedCost: 65,
-      reason: 'Delivers 24g of clean protein within your calorie window with low preparation time.',
-      recipeInstructions: [
-        'Finely chop onions, tomatoes, and green chillies.',
-        'Heat 1 tsp oil in a pan, add cumin seeds and saute onions until golden.',
-        'Add chopped tomatoes, turmeric, and salt. Cook until soft.',
-        'Crumble fresh paneer into the pan and mix well for 3-4 minutes.',
-        'Garnish with fresh coriander and serve hot with 2 warm rotis.'
-      ]
-    },
-    {
-      name: 'Moong Sprout & Boiled Egg / Chickpea Chaat',
-      ingredients: ['1 cup Steamed Moong Sprouts', '2 Boiled Eggs or 1/2 cup Chickpeas', 'Cucumber, Tomato, Lemon Juice', 'Chaat Masala, Roasted Cumin'],
-      calories: 260,
-      protein: 18,
-      carbs: 30,
-      fat: 5,
-      prepTimeMinutes: 8,
-      estimatedCost: 35,
-      reason: 'Light, budget-friendly, and packed with fiber and micronutrients.',
-      recipeInstructions: [
-        'Steam moong sprouts lightly for 3 minutes for easy digestion.',
-        'Dice boiled eggs or boiled chickpeas, cucumbers, and tomatoes.',
-        'Toss together in a bowl with lemon juice, chaat masala, and fresh mint.',
-        'Enjoy immediately as a nutrient-dense meal.'
-      ]
-    },
-    {
-      name: 'Wholesome High-Protein Dal Tadka with Brown Rice',
-      ingredients: ['1 cup Yellow Moong & Masoor Dal', '1 cup Cooked Brown Rice', 'Garlic, Ginger, Cumin, Mustard Seeds', '1 tsp Ghee', 'Fresh Spinach leaves'],
-      calories: 340,
-      protein: 16,
-      carbs: 54,
-      fat: 6,
-      prepTimeMinutes: 20,
-      estimatedCost: 40,
-      reason: 'Complete amino acid profile combining legumes and whole grains with soothing digestion.',
-      recipeInstructions: [
-        'Pressure cook mixed dal with chopped spinach, turmeric, and water for 3 whistles.',
-        'Heat ghee in a tadka pan, add cumin, mustard seeds, crushed garlic, and dried red chili.',
-        'Pour aromatic tempering over the dal and simmer for 2 minutes.',
-        'Serve with 1 cup of steamed brown rice.'
-      ]
-    }
-  ];
-
-  if (!ai) return defaultMeals;
-
-  try {
-    const prompt = `You are FitAI Nutrition Engine. Recommend 3 distinct, nutritious meal options for the current time of day (${userContext.timeOfDay}).
-User Requirements:
-- Goal: ${userContext.goal}
-- Diet: ${userContext.diet}
-- Food Regional Preferences: ${userContext.foodPreferences.join(', ') || 'Indian / International'}
-- STRICT ALLERGIES (MUST EXCLUDE): ${userContext.allergies.join(', ') || 'None'}
+  const prompt = `You are FitAI Nutrition Engine. Recommend exactly 3 distinct, healthy, practical meal options for the current time of day (${userContext.timeOfDay}).
+User Profile & Constraints:
+- Fitness Goal: ${userContext.goal.replace(/_/g, ' ')}
+- Dietary Type: ${userContext.diet}
+- Cuisine & Regional Preferences: ${userContext.foodPreferences.join(', ') || 'Indian / International'}
+- STRICT ALLERGIES (CRITICAL: NEVER INCLUDE ANY OF THESE INGREDIENTS OR DERIVATIVES): ${userContext.allergies.join(', ') || 'None'}
 - DISLIKED FOODS (DO NOT INCLUDE): ${userContext.dislikedFoods.join(', ') || 'None'}
-- Remaining Calories Available: ${Math.max(150, userContext.remainingCalories)} kcal
-- Remaining Protein Target: ${Math.max(10, userContext.remainingProtein)}g
-- Budget Context: Approx ₹${userContext.dailyBudget || 200}/day
+- Remaining Calories Window: ~${Math.max(150, userContext.remainingCalories)} kcal
+- Remaining Protein Target: ~${Math.max(10, userContext.remainingProtein)}g
+- Estimated Budget Target: Approx ₹${userContext.dailyBudget || 200}/day
 
-Return strictly a JSON array of exactly 3 objects:
+Safety & Authenticity Rules:
+1. Verify strictly that NO allergenic foods are included.
+2. Provide authentic ingredients with realistic portion sizes.
+3. Return strictly a JSON array of exactly 3 objects.
+
+JSON schema:
 [
   {
     "name": "Dish Name",
-    "ingredients": ["Item 1", "Item 2"],
+    "ingredients": ["150g Item with quantity", "1 tsp Spice/Oil"],
     "calories": 350,
     "protein": 22,
-    "carbs": 40,
-    "fat": 9,
+    "carbs": 38,
+    "fat": 10,
     "prepTimeMinutes": 15,
-    "estimatedCost": 50,
-    "reason": "Why this fits current macro needs and budget",
+    "estimatedCost": 60,
+    "reason": "Why this fits current remaining macros, time of day, and dietary preferences",
     "recipeInstructions": ["Step 1", "Step 2", "Step 3"]
   }
 ]`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+  try {
+    const response = await callGeminiWithFallback({
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.3,
+      }
+    });
+
+    const parsed = JSON.parse(response.text || '[]');
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.map((item) => ({
+        name: String(item.name || 'Nutritious Meal'),
+        ingredients: Array.isArray(item.ingredients) ? item.ingredients : [],
+        calories: Math.max(0, Math.round(Number(item.calories) || 0)),
+        protein: Math.max(0, Math.round(Number(item.protein) || 0)),
+        carbs: Math.max(0, Math.round(Number(item.carbs) || 0)),
+        fat: Math.max(0, Math.round(Number(item.fat) || 0)),
+        prepTimeMinutes: Math.max(5, Number(item.prepTimeMinutes) || 15),
+        estimatedCost: Math.max(10, Number(item.estimatedCost) || 50),
+        reason: String(item.reason || 'Optimized for your macro target.'),
+        recipeInstructions: Array.isArray(item.recipeInstructions) ? item.recipeInstructions : ['Prepare fresh ingredients and cook thoroughly.']
+      }));
+    }
+    throw new Error('Invalid AI response structure');
+  } catch (err: any) {
+    console.error('Gemini WhatShouldIEat error:', err);
+    throw new Error(err.message || 'Failed to generate meal suggestions with AI');
+  }
+}
+
+/**
+ * AI Recipe Generator from Pantry Ingredients
+ */
+export async function generateCustomRecipe(
+  ingredients: string[],
+  filter: string,
+  diet: string,
+  allergies: string[]
+): Promise<any> {
+  const prompt = `You are a culinary dietitian. Create a healthy, delicious recipe using the following available ingredients: ${ingredients.join(', ')}.
+User Preferences:
+- Diet: ${diet}
+- Recipe Focus / Goal: ${filter || 'High Protein & Balanced'}
+- STRICT ALLERGIES TO EXCLUDE: ${allergies.join(', ') || 'None'}
+
+Return strictly valid JSON matching this schema:
+{
+  "title": "Creative Appetizing Recipe Name",
+  "description": "Short description of taste and nutritional benefits",
+  "ingredients": ["100g Ingredient with exact quantity", "1 tbsp Olive oil / Ghee"],
+  "instructions": ["Step 1", "Step 2", "Step 3", "Step 4"],
+  "calories": 380,
+  "protein": 26,
+  "carbs": 42,
+  "fat": 10,
+  "prepTimeMinutes": 15,
+  "costEstimate": 50,
+  "tags": ["High Protein", "Quick Prep", "${diet}"]
+}`;
+
+  try {
+    const response = await callGeminiWithFallback({
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.4,
+      }
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    if (!parsed.title) {
+      throw new Error('AI could not generate a recipe from given ingredients.');
+    }
+    return {
+      title: parsed.title,
+      description: parsed.description || '',
+      ingredients: Array.isArray(parsed.ingredients) ? parsed.ingredients : ingredients,
+      instructions: Array.isArray(parsed.instructions) ? parsed.instructions : ['Cook ingredients together.'],
+      calories: Number(parsed.calories) || 350,
+      protein: Number(parsed.protein) || 20,
+      carbs: Number(parsed.carbs) || 40,
+      fat: Number(parsed.fat) || 10,
+      prepTimeMinutes: Number(parsed.prepTimeMinutes) || 15,
+      costEstimate: Number(parsed.costEstimate) || 50,
+      tags: Array.isArray(parsed.tags) ? parsed.tags : [filter, diet]
+    };
+  } catch (err: any) {
+    console.error('Gemini recipe generation error:', err);
+    throw new Error(err.message || 'Failed to generate custom recipe');
+  }
+}
+
+/**
+ * AI Personalized Meal Plan Generation
+ */
+export async function generateAiMealPlan(params: {
+  goal: string;
+  diet: string;
+  foodPreferences: string[];
+  allergies: string[];
+  dislikedFoods: string[];
+  dailyCalorieTarget: number;
+  proteinTarget: number;
+  dailyBudget: number;
+  daysCount?: number;
+}): Promise<any[]> {
+  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].slice(0, params.daysCount || 7);
+
+  const prompt = `You are a certified sports nutritionist. Generate a personalized ${days.length}-day meal plan.
+User Profile:
+- Goal: ${params.goal.replace(/_/g, ' ')}
+- Diet Type: ${params.diet}
+- Cuisine & Food Preferences: ${params.foodPreferences.join(', ') || 'Indian / Global'}
+- STRICT ALLERGIES (NEVER INCLUDE ANY OF THESE): ${params.allergies.join(', ') || 'None'}
+- DISLIKED FOODS: ${params.dislikedFoods.join(', ') || 'None'}
+- Daily Calorie Target: ~${params.dailyCalorieTarget} kcal
+- Daily Protein Target: ~${params.proteinTarget}g
+- Target Budget: ~₹${params.dailyBudget || 250}/day
+
+Return strictly a JSON array of days matching this schema:
+[
+  {
+    "day": "Monday",
+    "breakfast": { "name": "Dish Name", "calories": 300, "protein": 15, "carbs": 40, "fat": 8, "costEstimate": 35, "recipe": "Quick preparation instructions" },
+    "morningSnack": { "name": "Snack Name", "calories": 140, "protein": 10, "carbs": 18, "fat": 3, "costEstimate": 20, "recipe": "Quick prep" },
+    "lunch": { "name": "Lunch Main", "calories": 550, "protein": 35, "carbs": 60, "fat": 15, "costEstimate": 75, "recipe": "Preparation steps" },
+    "eveningSnack": { "name": "Evening Snack", "calories": 160, "protein": 8, "carbs": 12, "fat": 9, "costEstimate": 25, "recipe": "Preparation steps" },
+    "dinner": { "name": "Dinner Main", "calories": 480, "protein": 32, "carbs": 50, "fat": 12, "costEstimate": 60, "recipe": "Preparation steps" },
+    "dailyBudgetEstimate": 215
+  }
+]`;
+
+  try {
+    const response = await callGeminiWithFallback({
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -296,86 +438,16 @@ Return strictly a JSON array of exactly 3 objects:
     if (Array.isArray(parsed) && parsed.length > 0) {
       return parsed;
     }
-    return defaultMeals;
-  } catch (err) {
-    console.error('Gemini WhatShouldIEat error:', err);
-    return defaultMeals;
+    throw new Error('Invalid meal plan format from AI');
+  } catch (err: any) {
+    console.error('Gemini meal plan generator error:', err);
+    throw new Error(err.message || 'Failed to generate personalized meal plan');
   }
 }
 
-export async function generateCustomRecipe(ingredients: string[], filter: string, diet: string, allergies: string[]): Promise<any> {
-  const ai = getAiClient();
-  if (!ai) {
-    return {
-      title: 'Power Protein Scramble & Oats Bowl',
-      description: `A delicious dish custom-crafted using ${ingredients.join(', ')}.`,
-      ingredients: ingredients.length > 0 ? ingredients : ['Eggs / Tofu', 'Rolled Oats', 'Almond Milk', 'Chia Seeds', 'Banana'],
-      instructions: [
-        'Prepare the base ingredients by washing and measuring portions.',
-        'Cook in a non-stick pan with light seasoning to retain nutritional value.',
-        'Combine high-protein elements with wholesome carbs.',
-        'Serve fresh with a sprinkle of roasted seeds or fresh herbs.'
-      ],
-      calories: 360,
-      protein: 26,
-      carbs: 42,
-      fat: 9,
-      prepTimeMinutes: 12,
-      costEstimate: 45,
-      tags: [filter || 'High Protein', diet, 'Quick Prep']
-    };
-  }
-
-  try {
-    const prompt = `Create a healthy, delicious recipe using the following available ingredients: ${ingredients.join(', ')}.
-Preferences:
-- Diet: ${diet}
-- Preference / Focus filter: ${filter || 'High Protein & Balanced'}
-- STRICT ALLERGIES to exclude: ${allergies.join(', ') || 'None'}
-
-Return valid JSON with format:
-{
-  "title": "Creative Recipe Name",
-  "description": "Short appetizing description",
-  "ingredients": ["Item with quantity", "Item 2 with quantity"],
-  "instructions": ["Step 1", "Step 2", "Step 3", "Step 4"],
-  "calories": 380,
-  "protein": 25,
-  "carbs": 44,
-  "fat": 10,
-  "prepTimeMinutes": 15,
-  "costEstimate": 50,
-  "tags": ["High Protein", "Quick Meal", "${diet}"]
-}`;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.4,
-      }
-    });
-
-    return JSON.parse(response.text || '{}');
-  } catch (err) {
-    console.error('Gemini recipe generation error:', err);
-    return {
-      title: 'Nutritious Kitchen Creation',
-      description: 'Balanced meal crafted from your pantry ingredients.',
-      ingredients,
-      instructions: ['Combine ingredients in balanced proportions', 'Cook lightly with wholesome seasonings', 'Serve hot and fresh'],
-      calories: 350,
-      protein: 20,
-      carbs: 40,
-      fat: 10,
-      prepTimeMinutes: 15,
-      costEstimate: 50,
-      tags: ['Balanced', diet]
-    };
-  }
-}
-
+/**
+ * AI Workout Generator
+ */
 export async function generateAiWorkout(params: {
   goal: string;
   fitnessLevel: string;
@@ -384,49 +456,27 @@ export async function generateAiWorkout(params: {
   location: string;
   notes?: string;
 }): Promise<any> {
-  const ai = getAiClient();
-  const defaultWorkout = {
-    title: `Targeted ${params.durationMinutes}-Min ${params.goal.replace('_', ' ').toUpperCase()} Session`,
-    category: params.location || 'home',
-    fitnessLevel: params.fitnessLevel || 'beginner',
-    goal: params.goal,
-    durationMinutes: params.durationMinutes || 25,
-    caloriesBurnedEstimate: Math.round(params.durationMinutes * 8.5),
-    equipment: params.equipment.length > 0 ? params.equipment : ['Bodyweight'],
-    safetyGuidance: 'Warm up adequately. If you experience sharp joint pain or dizziness, stop immediately and rest.',
-    exercises: [
-      { name: 'Dynamic Joint Warmup & Arm Circles', sets: 2, reps: 20, restSec: 30, equipment: 'Bodyweight', instructions: 'Mobilize shoulders, spine, and hips smoothly.', muscleGroup: 'Warmup' },
-      { name: 'Goblet / Bodyweight Squats', sets: 3, reps: 15, restSec: 45, equipment: params.equipment.includes('Dumbbells') ? 'Dumbbells' : 'Bodyweight', instructions: 'Chest upright, push hips back, press through feet.', muscleGroup: 'Quads & Glutes' },
-      { name: 'Push-ups or Floor Press', sets: 3, reps: 12, restSec: 60, equipment: params.equipment.includes('Dumbbells') ? 'Dumbbells' : 'Bodyweight', instructions: 'Keep core tight, elbows tucked 45 degrees.', muscleGroup: 'Chest & Triceps' },
-      { name: 'Bent-Over Rows / Prone Cobra', sets: 3, reps: 12, restSec: 45, equipment: params.equipment.includes('Dumbbells') ? 'Dumbbells' : 'Bodyweight', instructions: 'Hinge at hips with flat back, pull with elbows.', muscleGroup: 'Upper Back' },
-      { name: 'Forearm Plank with Knee Taps', sets: 3, reps: 1, durationSec: 40, restSec: 45, equipment: 'Bodyweight', instructions: 'Brace core, tap knees alternatively without rocking hips.', muscleGroup: 'Core' }
-    ]
-  };
-
-  if (!ai) return defaultWorkout;
-
-  try {
-    const prompt = `Generate a customized, safe, structured workout routine.
+  const prompt = `Generate a customized, safe, structured workout routine.
 Parameters:
-- Goal: ${params.goal}
+- Goal: ${params.goal.replace(/_/g, ' ')}
 - Experience Level: ${params.fitnessLevel}
 - Available Equipment: ${params.equipment.join(', ') || 'Bodyweight only'}
 - Available Time: Exactly ${params.durationMinutes} minutes
 - Location: ${params.location}
-${params.notes ? `- User specific prompt: ${params.notes}` : ''}
+${params.notes ? `- User notes: ${params.notes}` : ''}
 
-Safety Rule: Include a clear safety guidance disclaimer.
+Safety Rule: Include a clear safety guidance disclaimer and form cues.
 
 Return strictly JSON matching this structure:
 {
   "title": "Creative Workout Title",
-  "category": "home",
-  "fitnessLevel": "beginner",
+  "category": "${params.location || 'home'}",
+  "fitnessLevel": "${params.fitnessLevel || 'beginner'}",
   "goal": "${params.goal}",
   "durationMinutes": ${params.durationMinutes},
   "caloriesBurnedEstimate": 220,
   "equipment": ["Dumbbells"],
-  "safetyGuidance": "Safety note advising correct form and stopping if sharp pain occurs.",
+  "safetyGuidance": "Maintain neutral spine. Stop if sharp joint discomfort occurs.",
   "exercises": [
     {
       "name": "Exercise Name",
@@ -435,15 +485,15 @@ Return strictly JSON matching this structure:
       "durationSec": 0,
       "restSec": 45,
       "equipment": "Dumbbells",
-      "instructions": "Clear form cue",
-      "muscleGroup": "Primary Muscle Target",
-      "caloriesBurnedEstimate": 45
+      "instructions": "Clear form cues",
+      "muscleGroup": "Primary Muscle Group",
+      "caloriesBurnedEstimate": 40
     }
   ]
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+  try {
+    const response = await callGeminiWithFallback({
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -452,13 +502,19 @@ Return strictly JSON matching this structure:
     });
 
     const parsed = JSON.parse(response.text || '{}');
-    return parsed.title ? parsed : defaultWorkout;
-  } catch (err) {
+    if (!parsed.title || !Array.isArray(parsed.exercises)) {
+      throw new Error('Invalid workout format returned from AI');
+    }
+    return parsed;
+  } catch (err: any) {
     console.error('Gemini workout generator error:', err);
-    return defaultWorkout;
+    throw new Error(err.message || 'Failed to generate workout with AI');
   }
 }
 
+/**
+ * AI Progress Analysis
+ */
 export async function generateProgressAnalysis(stats: {
   userName: string;
   goal: string;
@@ -483,27 +539,9 @@ export async function generateProgressAnalysis(stats: {
   actionSteps: string[];
   disclaimer: string;
 }> {
-  const ai = getAiClient();
-  const defaultAnalysis = {
-    summary: `${stats.userName}, your progress trend shows consistent engagement towards your ${stats.goal.replace('_', ' ')} target. You have maintained a solid average calorie intake and steady workout frequency.`,
-    consistencyScore: 84,
-    nutritionAdherence: `Your average daily protein intake is ${stats.avgProtein}g vs your ${stats.proteinTarget}g target. Prioritize adding high-protein staples (eggs, paneer, sprouts, chicken, or soy) with breakfast and post-workout.`,
-    workoutAnalysis: `Completed ${stats.workoutsCompleted} sessions over the tracked timeframe. Progressive overload and active recovery will continue driving steady metabolic adaptation.`,
-    hydrationAndSleep: `Hydration averaged ${(stats.avgWaterMl / 1000).toFixed(1)}L/day and sleep averaged ${stats.avgSleepHours} hours. Both are foundational for muscle recovery and cortisol balance.`,
-    actionSteps: [
-      'Increase morning hydration by drinking 500ml water upon waking.',
-      'Aim for at least 25g protein per main meal to optimize muscle protein synthesis.',
-      'Maintain 7+ hours of quality sleep to support recovery and energy levels.'
-    ],
-    disclaimer: 'Disclaimer: This progress analysis provides general lifestyle guidance based on your logged metrics and is not a medical evaluation. Consult a qualified healthcare specialist for clinical advice.'
-  };
-
-  if (!ai) return defaultAnalysis;
-
-  try {
-    const prompt = `Analyze this user fitness & nutrition progress dataset:
+  const prompt = `Analyze this user fitness & nutrition progress dataset:
 - User: ${stats.userName}
-- Fitness Goal: ${stats.goal}
+- Fitness Goal: ${stats.goal.replace(/_/g, ' ')}
 - Current Weight: ${stats.currentWeight}kg | Target Weight: ${stats.targetWeight}kg
 - Weight Data Points: ${JSON.stringify(stats.weightTrend.slice(-10))}
 - Nutrition: Avg Calories ${stats.avgCalories} kcal (Target: ${stats.calorieTarget}), Avg Protein ${stats.avgProtein}g (Target: ${stats.proteinTarget}g)
@@ -511,19 +549,20 @@ export async function generateProgressAnalysis(stats: {
 - Water Intake: Avg ${stats.avgWaterMl}ml (Target: ${stats.waterTarget}ml)
 - Sleep: Avg ${stats.avgSleepHours} hours
 
-Provide a comprehensive, encouraging analysis. Return strictly valid JSON:
+Provide an honest, analytical, encouraging breakdown.
+Return strictly valid JSON:
 {
   "summary": "2-3 sentence overarching summary of trajectory and positive habits",
   "consistencyScore": 85,
   "nutritionAdherence": "Detailed observations on calories, protein, and dietary discipline",
   "workoutAnalysis": "Observations on training frequency, volume, and recovery",
   "hydrationAndSleep": "Review of hydration and sleep adequacy",
-  "actionSteps": ["Actionable step 1", "Actionable step 2", "Actionable step 3"],
-  "disclaimer": "Health disclaimer stating this is educational fitness tracking, not medical diagnosis."
+  "actionSteps": ["Specific actionable step 1", "Actionable step 2", "Actionable step 3"],
+  "disclaimer": "Disclaimer: This progress analysis provides general lifestyle guidance based on your logged metrics and is not a medical evaluation. Consult a qualified healthcare specialist for clinical advice."
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+  try {
+    const response = await callGeminiWithFallback({
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -532,70 +571,80 @@ Provide a comprehensive, encouraging analysis. Return strictly valid JSON:
     });
 
     const parsed = JSON.parse(response.text || '{}');
-    return parsed.summary ? parsed : defaultAnalysis;
-  } catch (err) {
+    if (!parsed.summary) {
+      throw new Error('Invalid progress analysis format');
+    }
+    return {
+      summary: parsed.summary,
+      consistencyScore: Math.min(100, Math.max(0, Number(parsed.consistencyScore) || 80)),
+      nutritionAdherence: parsed.nutritionAdherence || 'Consistent nutrition tracking.',
+      workoutAnalysis: parsed.workoutAnalysis || 'Good workout regularity.',
+      hydrationAndSleep: parsed.hydrationAndSleep || 'Adequate hydration and rest.',
+      actionSteps: Array.isArray(parsed.actionSteps) ? parsed.actionSteps : ['Keep logging daily.'],
+      disclaimer: parsed.disclaimer || 'Disclaimer: General fitness tracking, not medical diagnosis.'
+    };
+  } catch (err: any) {
     console.error('Gemini progress analysis error:', err);
-    return defaultAnalysis;
+    throw new Error(err.message || 'Failed to generate progress analysis with AI');
   }
 }
 
-export async function chatWithAiCoach(messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>, userProfile: any, todayStats: any): Promise<string> {
-  const ai = getAiClient();
-  if (!ai) {
-    const lastUserMsg = messages[messages.length - 1]?.content.toLowerCase() || '';
-    if (lastUserMsg.includes('protein')) {
-      return `Based on your profile, your daily protein target is **${userProfile?.proteinTarget || 120}g**. Today you have logged **${todayStats?.proteinConsumed || 0}g**. Good whole-food sources include boiled eggs, paneer, soy chunks, Greek yogurt, chicken breast, lentils, and whey protein.`;
-    }
-    if (lastUserMsg.includes('workout') || lastUserMsg.includes('exercise')) {
-      return `To achieve your goal of **${userProfile?.fitnessGoal?.replace('_', ' ') || 'improving fitness'}**, consistency is key! Aim for 3-4 structured sessions per week with adequate rest between muscle groups. Would you like me to generate a tailored workout for you?`;
-    }
-    if (lastUserMsg.includes('eat') || lastUserMsg.includes('food') || lastUserMsg.includes('hungry')) {
-      return `You have approximately **${Math.max(0, (userProfile?.dailyCalorieTarget || 2000) - (todayStats?.caloriesConsumed || 0))} kcal** remaining for today. A great option right now would be a high-protein stir fry, paneer bhurji with roti, or a sprout salad with boiled eggs!`;
-    }
-    return `Hello! I am your FitAI Coach. I am here to help you optimize your training, nutrition, hydration, and recovery according to your personal goals. What would you like guidance on today?`;
-  }
-
-  try {
-    const systemPrompt = `You are FitAI Coach, a supportive, highly knowledgeable personal fitness, nutrition, and wellness coach.
+/**
+ * AI Coach Interactive Chat
+ */
+export async function chatWithAiCoach(
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+  userProfile: any,
+  todayStats: any,
+  recentLogs?: any
+): Promise<string> {
+  const systemPrompt = `You are FitAI Coach, a supportive, evidence-based personal fitness, nutrition, and wellness coach.
 You have real-time access to the user's active profile and today's tracked metrics:
 User Profile:
 - Name: ${userProfile?.name || 'Athlete'}
 - Age: ${userProfile?.age || 26} | Gender: ${userProfile?.gender || 'not specified'}
-- Height: ${userProfile?.height || 175}cm | Weight: ${userProfile?.weight || 72}kg (Target: ${userProfile?.targetWeight || 68}kg)
-- Fitness Goal: ${userProfile?.fitnessGoal || 'lose_fat'}
+- Height: ${userProfile?.height || 175}cm | Current Weight: ${userProfile?.weight || 72}kg (Target: ${userProfile?.targetWeight || 68}kg)
+- Fitness Goal: ${userProfile?.fitnessGoal?.replace(/_/g, ' ') || 'lose fat'}
 - Dietary Preference: ${userProfile?.diet || 'vegetarian'}
-- Allergies: ${userProfile?.allergies?.join(', ') || 'None'}
+- Allergies (CRITICAL: NEVER RECOMMEND): ${userProfile?.allergies?.join(', ') || 'None'}
 - Disliked Foods: ${userProfile?.dislikedFoods?.join(', ') || 'None'}
 - Calorie Target: ${userProfile?.dailyCalorieTarget || 2000} kcal
 - Protein Target: ${userProfile?.proteinTarget || 120}g
 
-Today's Logged Numbers:
+Today's Logged Metrics:
 - Calories Consumed: ${todayStats?.caloriesConsumed || 0} / ${userProfile?.dailyCalorieTarget || 2000} kcal
 - Protein Consumed: ${todayStats?.proteinConsumed || 0} / ${userProfile?.proteinTarget || 120}g
 - Water Consumed: ${todayStats?.waterConsumed || 0} / ${userProfile?.waterTargetMl || 3000} ml
 - Workout Done Today: ${todayStats?.workoutDone ? 'Yes' : 'Not yet'}
-- Steps Today: ${todayStats?.steps || 0}
+- Steps Today: ${todayStats?.steps || 0} / ${userProfile?.stepGoal || 8000}
 
 Communication Guidelines:
 1. Always give realistic, motivating, practical advice.
-2. Directly reference their current numbers when relevant (e.g. remaining protein or water).
-3. Respect all allergies and dietary preferences strictly.
+2. Directly reference their current numbers when relevant.
+3. Strictly respect all allergies and dietary preferences.
 4. Format responses cleanly with bold highlights and bullet points for readability.
 5. Include friendly encouragement and never offer dangerous or unverified medical diagnoses.`;
 
-    const conversationHistory = messages.map(m => `${m.role === 'user' ? 'User' : 'FitAI Coach'}: ${m.content}`).join('\n\n');
+  const conversationHistory = messages.map(m => `${m.role === 'user' ? 'User' : 'FitAI Coach'}: ${m.content}`).join('\n\n');
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
-      contents: `${systemPrompt}\n\nConversation so far:\n${conversationHistory}\n\nFitAI Coach:`,
+  try {
+    const response = await callGeminiWithFallback({
+      contents: `${systemPrompt}\n\nConversation History:\n${conversationHistory}\n\nFitAI Coach:`,
       config: {
         temperature: 0.6,
       }
     });
 
     return response.text?.trim() || 'I am right here with you! How can I assist with your fitness or meals today?';
-  } catch (err) {
-    console.error('Gemini chat error:', err);
-    return 'I am ready to help you reach your goals! What fitness or nutrition questions do you have?';
+  } catch (err: any) {
+    console.warn('Gemini chat temporary spike fallback:', err.message);
+    const lastUserMsg = messages[messages.length - 1]?.content.toLowerCase() || '';
+    if (lastUserMsg.includes('eat') || lastUserMsg.includes('food') || lastUserMsg.includes('diet') || lastUserMsg.includes('hungry')) {
+      return `Based on your ${userProfile?.diet || 'healthy'} diet and ${userProfile?.fitnessGoal?.replace(/_/g, ' ') || 'fitness'} goal, aim for balanced meals with ~${Math.round((userProfile?.proteinTarget || 120) / 3)}g protein per meal (like lentils, tofu, paneer, eggs, or Greek yogurt) and stay mindful of your daily ${userProfile?.dailyCalorieTarget || 2000} kcal target.`;
+    }
+    if (lastUserMsg.includes('workout') || lastUserMsg.includes('exercise') || lastUserMsg.includes('training')) {
+      return `For your ${userProfile?.fitnessGoal?.replace(/_/g, ' ') || 'training'} goal, keep workouts focused: dynamic warm-up (3 mins), 3-4 compound movements with good form, and 2 minutes of stretching. Consistency beats intensity every time!`;
+    }
+    return `I am keeping track of your ${userProfile?.fitnessGoal?.replace(/_/g, ' ') || 'fitness'} progress! You currently have ${todayStats?.proteinConsumed || 0}g protein and ${todayStats?.waterConsumed || 0}ml water logged today. Let me know what specific workout, meal, or recovery question you have!`;
   }
 }

@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Modal } from '../common/Modal';
 import { api } from '../../services/api';
 import { useNotifications } from '../../context/NotificationContext';
-import { Camera, Upload, Sparkles, CheckCircle2, AlertCircle, RefreshCw, Flame } from 'lucide-react';
+import { Camera, Sparkles, CheckCircle2, AlertCircle, RefreshCw, Flame, Edit3, Info } from 'lucide-react';
 
 interface ScanFoodModalProps {
   isOpen: boolean;
@@ -23,12 +23,23 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
   const [error, setError] = useState<string | null>(null);
   const [mealType, setMealType] = useState<'breakfast' | 'lunch' | 'dinner' | 'morning_snack' | 'evening_snack'>('lunch');
   const [isLogging, setIsLogging] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+
+  // Editable fields
+  const [editName, setEditName] = useState('');
+  const [editPortion, setEditPortion] = useState('');
+  const [editCalories, setEditCalories] = useState<number>(0);
+  const [editProtein, setEditProtein] = useState<number>(0);
+  const [editCarbs, setEditCarbs] = useState<number>(0);
+  const [editFat, setEditFat] = useState<number>(0);
+  const [editFiber, setEditFiber] = useState<number>(0);
 
   const resetScanner = () => {
     setImagePreview(null);
     setImageBase64(null);
     setResult(null);
     setError(null);
+    setIsEditing(false);
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -37,6 +48,7 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
 
     setError(null);
     setResult(null);
+    setIsEditing(false);
     setMimeType(file.type || 'image/jpeg');
 
     const reader = new FileReader();
@@ -57,9 +69,16 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
     try {
       const data = await api.scanFood(imageBase64, mimeType);
       setResult(data);
+      setEditName(data.foodName || 'Identified Dish');
+      setEditPortion(data.portionEstimate || '1 serving');
+      setEditCalories(data.calories || 0);
+      setEditProtein(data.protein || 0);
+      setEditCarbs(data.carbs || 0);
+      setEditFat(data.fat || 0);
+      setEditFiber(data.fiber || 0);
     } catch (err: any) {
       console.error('Scan food error:', err);
-      setError(err.message || 'Could not analyze food image. Please try a clearer picture.');
+      setError(err.message || 'Could not analyze food image. Please try a clearer picture or enter details manually.');
     } finally {
       setAnalyzing(false);
     }
@@ -71,18 +90,18 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
     try {
       await api.addFoodLog({
         mealType,
-        foodName: result.foodName,
-        servingSize: result.portionSize || '1 plate',
-        calories: result.calories,
-        protein: result.protein,
-        carbs: result.carbs,
-        fat: result.fat,
-        fiber: result.fiber || 0,
+        foodName: editName || result.foodName,
+        servingSize: editPortion || result.portionEstimate || '1 serving',
+        calories: Number(editCalories),
+        protein: Number(editProtein),
+        carbs: Number(editCarbs),
+        fat: Number(editFat),
+        fiber: Number(editFiber) || 0,
       });
 
       sendLocalNotification(
         'Meal Logged via AI Vision! 📸',
-        `Added "${result.foodName}" (${result.calories} kcal, ${result.protein}g protein) to your ${mealType}.`,
+        `Added "${editName || result.foodName}" (${editCalories} kcal, ${editProtein}g protein) to your ${mealType.replace('_', ' ')}.`,
         'meal'
       );
 
@@ -105,7 +124,7 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
         resetScanner();
       }}
       title="FitAI Vision • Food Scanner"
-      subtitle="Powered by Gemini 2.5 Flash Vision for Indian & Global dishes"
+      subtitle="AI-powered recognition for Indian & Global dishes"
       maxWidth="lg"
     >
       <div className="space-y-4">
@@ -121,9 +140,20 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
         />
 
         {error && (
-          <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/80 rounded-xl text-red-700 dark:text-red-300 text-xs font-medium flex items-center space-x-2">
-            <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
-            <span>{error}</span>
+          <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/80 rounded-xl text-red-700 dark:text-red-300 text-xs font-medium flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+              <span>{error}</span>
+            </div>
+            {imageBase64 && (
+              <button
+                type="button"
+                onClick={handleAnalyze}
+                className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shrink-0"
+              >
+                Retry
+              </button>
+            )}
           </div>
         )}
 
@@ -143,7 +173,7 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
                 className="py-2.5 px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-2 transition-colors shadow-xs"
               >
                 <Camera className="w-4 h-4" />
-                <span>Snap Camera / Browse</span>
+                <span>Snap Camera / Browse Photo</span>
               </button>
             </div>
           </div>
@@ -172,7 +202,7 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
                 {analyzing ? (
                   <>
                     <Sparkles className="w-4 h-4 animate-spin text-amber-300" />
-                    <span>Gemini AI Analyzing Ingredients & Macros...</span>
+                    <span>FitAI Gemini Vision Analyzing Ingredients & Macros...</span>
                   </>
                 ) : (
                   <>
@@ -187,49 +217,115 @@ export const ScanFoodModal: React.FC<ScanFoodModalProps> = ({ isOpen, onClose, o
             {result && (
               <div className="p-4 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/80 rounded-2xl space-y-3">
                 <div className="flex items-start justify-between">
-                  <div>
+                  <div className="flex-1 mr-2">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">
-                      Identified Food • {result.confidence}% Confidence
+                      Identified Food • {Math.round((result.confidenceScore || 0.9) * 100)}% Match
                     </span>
-                    <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100 mt-0.5">
-                      {result.foodName}
-                    </h3>
-                    <p className="text-xs text-neutral-600 dark:text-neutral-400">Portion: {result.portionSize}</p>
+                    {isEditing ? (
+                      <div className="mt-1 space-y-1.5">
+                        <input
+                          type="text"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          className="w-full px-2.5 py-1 text-sm font-bold bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg"
+                        />
+                        <input
+                          type="text"
+                          value={editPortion}
+                          onChange={(e) => setEditPortion(e.target.value)}
+                          className="w-full px-2.5 py-1 text-xs bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg"
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <h3 className="text-base font-bold text-neutral-900 dark:text-neutral-100 mt-0.5">
+                          {editName || result.foodName}
+                        </h3>
+                        <p className="text-xs text-neutral-600 dark:text-neutral-400">
+                          Portion: {editPortion || result.portionEstimate || '1 serving'}
+                        </p>
+                      </>
+                    )}
                   </div>
-                  <div className="text-right">
-                    <span className="text-xs font-bold text-emerald-800 dark:text-emerald-200 bg-emerald-200/60 dark:bg-emerald-900/60 px-2 py-0.5 rounded-md">
-                      Score: {result.healthScore}/10
-                    </span>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditing(!isEditing)}
+                    className="p-1.5 bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 rounded-lg text-xs font-semibold flex items-center space-x-1"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>{isEditing ? 'Done' : 'Adjust'}</span>
+                  </button>
                 </div>
 
-                {/* Macro Badges */}
-                <div className="grid grid-cols-4 gap-2 pt-1 text-center">
-                  <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
-                    <Flame className="w-3.5 h-3.5 mx-auto text-amber-500 mb-0.5" />
-                    <div className="text-xs font-bold text-neutral-900 dark:text-neutral-100">{result.calories}</div>
-                    <div className="text-[10px] text-neutral-500">kcal</div>
+                {/* Macro Cards / Input fields */}
+                {isEditing ? (
+                  <div className="grid grid-cols-4 gap-2 pt-1">
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold block text-center">Calories</label>
+                      <input
+                        type="number"
+                        value={editCalories}
+                        onChange={(e) => setEditCalories(Number(e.target.value))}
+                        className="w-full p-1 text-center font-bold text-xs bg-white dark:bg-neutral-800 border rounded-lg"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold block text-center">Protein (g)</label>
+                      <input
+                        type="number"
+                        value={editProtein}
+                        onChange={(e) => setEditProtein(Number(e.target.value))}
+                        className="w-full p-1 text-center font-bold text-xs bg-white dark:bg-neutral-800 border rounded-lg text-emerald-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold block text-center">Carbs (g)</label>
+                      <input
+                        type="number"
+                        value={editCarbs}
+                        onChange={(e) => setEditCarbs(Number(e.target.value))}
+                        className="w-full p-1 text-center font-bold text-xs bg-white dark:bg-neutral-800 border rounded-lg text-sky-600"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-neutral-500 font-semibold block text-center">Fat (g)</label>
+                      <input
+                        type="number"
+                        value={editFat}
+                        onChange={(e) => setEditFat(Number(e.target.value))}
+                        className="w-full p-1 text-center font-bold text-xs bg-white dark:bg-neutral-800 border rounded-lg text-amber-600"
+                      />
+                    </div>
                   </div>
-                  <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
-                    <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400">{result.protein}g</div>
-                    <div className="text-[10px] text-neutral-500">Protein</div>
+                ) : (
+                  <div className="grid grid-cols-4 gap-2 pt-1 text-center">
+                    <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
+                      <Flame className="w-3.5 h-3.5 mx-auto text-amber-500 mb-0.5" />
+                      <div className="text-xs font-bold text-neutral-900 dark:text-neutral-100">{editCalories}</div>
+                      <div className="text-[10px] text-neutral-500">kcal</div>
+                    </div>
+                    <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
+                      <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400">{editProtein}g</div>
+                      <div className="text-[10px] text-neutral-500">Protein</div>
+                    </div>
+                    <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
+                      <div className="text-xs font-bold text-sky-600 dark:text-sky-400">{editCarbs}g</div>
+                      <div className="text-[10px] text-neutral-500">Carbs</div>
+                    </div>
+                    <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
+                      <div className="text-xs font-bold text-amber-600 dark:text-amber-400">{editFat}g</div>
+                      <div className="text-[10px] text-neutral-500">Fat</div>
+                    </div>
                   </div>
-                  <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
-                    <div className="text-xs font-bold text-sky-600 dark:text-sky-400">{result.carbs}g</div>
-                    <div className="text-[10px] text-neutral-500">Carbs</div>
-                  </div>
-                  <div className="p-2 bg-white dark:bg-neutral-800/80 rounded-xl border border-neutral-200/60 dark:border-neutral-700/60">
-                    <div className="text-xs font-bold text-amber-600 dark:text-amber-400">{result.fat}g</div>
-                    <div className="text-[10px] text-neutral-500">Fat</div>
-                  </div>
-                </div>
-
-                {/* AI Advice */}
-                {result.advice && (
-                  <p className="text-xs text-emerald-900 dark:text-emerald-200 bg-emerald-100/50 dark:bg-emerald-950/50 p-2.5 rounded-xl">
-                    💡 <strong>Coach Note:</strong> {result.advice}
-                  </p>
                 )}
+
+                {/* Mandatory Disclaimer */}
+                <div className="flex items-start space-x-1.5 p-2 bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50 rounded-xl text-[11px] text-amber-900 dark:text-amber-300">
+                  <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                  <span>
+                    Nutrition values from images are estimates and may vary depending on ingredients, cooking method, oil, and portion size.
+                  </span>
+                </div>
 
                 {/* Log Meal Selector & Action */}
                 <div className="pt-2 border-t border-emerald-200/60 dark:border-emerald-800/60 flex items-center justify-between">

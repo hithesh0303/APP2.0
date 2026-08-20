@@ -219,10 +219,22 @@ router.post('/analyze-progress', authenticateToken, async (req: AuthenticatedReq
 router.post('/chat', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
     const userId = req.user!.id;
-    const { messages } = req.body;
+    let messages = req.body.messages;
+
+    // Handle { message, history } format if provided
+    if (!messages && req.body.message) {
+      const history = Array.isArray(req.body.history) ? req.body.history : [];
+      messages = [
+        ...history.map((h: any) => ({
+          role: h.role === 'model' || h.role === 'assistant' ? 'assistant' : 'user',
+          content: typeof h.parts?.[0]?.text === 'string' ? h.parts[0].text : (h.content || ''),
+        })),
+        { role: 'user', content: req.body.message }
+      ];
+    }
 
     if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: 'Messages array is required' });
+      return res.status(400).json({ error: 'Messages array or message string is required' });
     }
 
     const today = new Date().toISOString().split('T')[0];
@@ -250,6 +262,7 @@ router.post('/chat', authenticateToken, async (req: AuthenticatedRequest, res) =
     return res.json({
       role: 'assistant',
       content: reply,
+      reply: reply,
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {

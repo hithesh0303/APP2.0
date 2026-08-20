@@ -173,6 +173,10 @@ export interface ReminderItem {
   time: string; // "HH:mm"
   repeatDays: string[]; // ["Mon", "Tue", ...]
   enabled: boolean;
+  message?: string;
+  intervalMinutes?: number;
+  quietHoursStart?: string;
+  quietHoursEnd?: string;
 }
 
 export interface NotificationItem {

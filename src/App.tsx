@@ -19,7 +19,7 @@ import { RemindersModal } from './components/reminders/RemindersModal';
 import { WorkoutTemplate } from './types';
 
 const MainAppContent: React.FC = () => {
-  const { isAuthenticated, user, profile, loading } = useAuth();
+  const { isAuthenticated, user, profile, isLoading } = useAuth();
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'food' | 'workout' | 'coach' | 'progress' | 'profile'>('dashboard');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -27,7 +27,7 @@ const MainAppContent: React.FC = () => {
   const [isRemindersOpen, setIsRemindersOpen] = useState(false);
   const [activeWorkoutSession, setActiveWorkoutSession] = useState<WorkoutTemplate | null>(null);
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-neutral-900 text-white flex flex-col items-center justify-center space-y-4">
         <div className="w-12 h-12 rounded-2xl bg-emerald-600 flex items-center justify-center text-xl font-black animate-pulse">
@@ -38,8 +38,10 @@ const MainAppContent: React.FC = () => {
     );
   }
 
-  // If user is authenticated but hasn't finished profile setup, show Onboarding Wizard
-  const needsOnboarding = isAuthenticated && (!profile || !profile.heightCm || !profile.weight);
+  // If user is authenticated and explicitly hasn't finished profile setup, show Onboarding Wizard
+  const needsOnboarding = Boolean(
+    isAuthenticated && profile && profile.onboardingCompleted === false
+  );
 
   return (
     <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 transition-colors duration-200">
@@ -68,7 +70,10 @@ const MainAppContent: React.FC = () => {
             {activeTab === 'coach' && <CoachChatScreen />}
             {activeTab === 'progress' && <ProgressScreen />}
             {activeTab === 'profile' && (
-              <ProfileScreen onOpenReminders={() => setIsRemindersOpen(true)} />
+              <ProfileScreen
+                onOpenReminders={() => setIsRemindersOpen(true)}
+                onOpenAuth={() => setIsAuthModalOpen(true)}
+              />
             )}
           </>
         )}
@@ -117,11 +122,11 @@ const MainAppContent: React.FC = () => {
 export default function App() {
   return (
     <ThemeProvider>
-      <NotificationProvider>
-        <AuthProvider>
+      <AuthProvider>
+        <NotificationProvider>
           <MainAppContent />
-        </AuthProvider>
-      </NotificationProvider>
+        </NotificationProvider>
+      </AuthProvider>
     </ThemeProvider>
   );
 }

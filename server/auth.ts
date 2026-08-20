@@ -1,9 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { db, User } from './db.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'fitai_production_jwt_super_secret_key_2026';
+const JWT_SECRET = process.env.JWT_SECRET || 'fitai_app_secure_session_key_2026';
 
 export interface AuthenticatedRequest extends Request {
   user?: User;
@@ -23,6 +24,11 @@ export function generateToken(user: User): string {
     JWT_SECRET,
     { expiresIn: '30d' }
   );
+}
+
+export function generateSecureResetCode(): string {
+  // Generate random 6-digit verification code
+  return crypto.randomInt(100000, 999999).toString();
 }
 
 export function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
@@ -54,4 +60,12 @@ export function requireAdmin(req: AuthenticatedRequest, res: Response, next: Nex
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();
+}
+
+export function isDesignatedAdmin(email: string): boolean {
+  const adminList = (process.env.ADMIN_EMAILS || process.env.ADMIN_EMAIL || 'admin@fitai.app')
+    .toLowerCase()
+    .split(',')
+    .map(e => e.trim());
+  return adminList.includes(email.toLowerCase().trim());
 }

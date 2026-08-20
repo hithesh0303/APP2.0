@@ -1,12 +1,106 @@
 import { Router } from 'express';
 import { db, User, UserProfile } from '../db.js';
-import { hashPassword, comparePassword, generateToken, authenticateToken, AuthenticatedRequest } from '../auth.js';
+import {
+  hashPassword,
+  comparePassword,
+  generateToken,
+  generateSecureResetCode,
+  authenticateToken,
+  isDesignatedAdmin,
+  AuthenticatedRequest,
+} from '../auth.js';
 import { calculateFitnessTargets } from '../calculations.js';
 
 const router = Router();
 
-// In-memory or state reset codes for Forgot Password
-const resetTokens: Record<string, { email: string; expires: number; code: string }> = {};
+// Store temporary reset records: email -> { code, expiresAt }
+const resetTokens: Record<string, { email: string; expiresAt: number; code: string }> = {};
+
+// POST /api/auth/quick-session (Seamless dev / demo quick login)
+router.post('/quick-session', (req, res) => {
+  try {
+    const email = (req.body.email || 'hitheshavula@gmail.com').trim().toLowerCase();
+    const name = (req.body.name || 'Hithesh Avula').trim();
+
+    let user = db.get().users.find(u => u.email.toLowerCase() === email);
+    if (!user) {
+      user = {
+        id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        name,
+        email,
+        passwordHash: hashPassword('password123'),
+        role: isDesignatedAdmin(email) ? 'admin' : 'user',
+        createdAt: new Date().toISOString(),
+      };
+      db.get().users.push(user);
+    }
+
+    let profile = db.get().profiles.find(p => p.userId === user!.id);
+    if (!profile) {
+      const initialTargets = calculateFitnessTargets({
+        age: 26,
+        gender: 'male',
+        height: 175,
+        weight: 72,
+        activityLevel: 'moderate',
+        fitnessGoal: 'lose_fat',
+      });
+
+      profile = {
+        userId: user.id,
+        age: 26,
+        gender: 'male',
+        height: 175,
+        weight: 72,
+        targetWeight: 68,
+        activityLevel: 'moderate',
+        fitnessExperience: 'beginner',
+        fitnessGoal: 'lose_fat',
+        workoutPreference: 'home',
+        availableEquipment: ['Dumbbells', 'Resistance bands'],
+        diet: 'vegetarian',
+        foodPreferences: ['South Indian', 'North Indian'],
+        allergies: [],
+        dislikedFoods: [],
+        dailyBudget: 250,
+        weeklyBudget: 1750,
+        availableWorkoutTime: 30,
+        sleepTime: '23:00',
+        wakeTime: '07:00',
+        themePreference: 'light',
+        dailyCalorieTarget: initialTargets.dailyCalorieTarget,
+        proteinTarget: initialTargets.proteinTarget,
+        carbsTarget: initialTargets.carbsTarget,
+        fatTarget: initialTargets.fatTarget,
+        waterTargetMl: initialTargets.waterTargetMl,
+        stepGoal: initialTargets.stepGoal,
+        sleepGoalHours: 8,
+        bmi: initialTargets.bmi,
+        bmiCategory: initialTargets.bmiCategory,
+        onboardingCompleted: true,
+        updatedAt: new Date().toISOString(),
+      };
+      db.get().profiles.push(profile);
+    }
+
+    db.save();
+    const token = generateToken(user);
+
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+      profile,
+    });
+  } catch (err: any) {
+    console.error('Quick session error:', err);
+    return res.status(500).json({ error: 'Failed to create quick session' });
+  }
+});
 
 // POST /api/auth/register
 router.post('/register', (req, res) => {
@@ -23,43 +117,42 @@ router.post('/register', (req, res) => {
       return res.status(400).json({ error: 'An account with this email already exists' });
     }
 
-    if (password.length < 6) {
+    if (String(password).length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
     const newUser: User = {
       id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      name: name.trim(),
+      name: String(name).trim(),
       email: emailClean,
-      passwordHash: hashPassword(password),
-      role: emailClean.includes('admin') ? 'admin' : 'user',
+      passwordHash: hashPassword(String(password)),
+      role: isDesignatedAdmin(emailClean) ? 'admin' : 'user',
       createdAt: new Date().toISOString(),
     };
 
-    // Calculate initial baseline profile
     const initialTargets = calculateFitnessTargets({
-      age: 26,
+      age: 25,
       gender: 'male',
       height: 175,
-      weight: 72,
+      weight: 70,
       activityLevel: 'moderate',
       fitnessGoal: 'lose_fat',
     });
 
     const newProfile: UserProfile = {
       userId: newUser.id,
-      age: 26,
+      age: 25,
       gender: 'male',
       height: 175,
-      weight: 72,
-      targetWeight: 68,
+      weight: 70,
+      targetWeight: 66,
       activityLevel: 'moderate',
       fitnessExperience: 'beginner',
       fitnessGoal: 'lose_fat',
       workoutPreference: 'home',
-      availableEquipment: ['Dumbbells', 'Resistance bands'],
+      availableEquipment: ['Bodyweight'],
       diet: 'vegetarian',
-      foodPreferences: ['South Indian', 'North Indian'],
+      foodPreferences: ['Indian'],
       allergies: [],
       dislikedFoods: [],
       dailyBudget: 250,
@@ -86,11 +179,11 @@ router.post('/register', (req, res) => {
 
     // Seed initial reminders for new user
     const defaultReminders = [
-      { id: `rem_${Date.now()}_1`, userId: newUser.id, type: 'breakfast' as const, title: 'Nutritious Breakfast', time: '08:30', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true },
-      { id: `rem_${Date.now()}_2`, userId: newUser.id, type: 'water' as const, title: 'Hydration Check-in (500ml)', time: '11:00', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true },
-      { id: `rem_${Date.now()}_3`, userId: newUser.id, type: 'lunch' as const, title: 'Balanced Lunch', time: '13:00', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true },
-      { id: `rem_${Date.now()}_4`, userId: newUser.id, type: 'workout' as const, title: 'Daily Workout Session', time: '18:00', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], enabled: true },
-      { id: `rem_${Date.now()}_5`, userId: newUser.id, type: 'dinner' as const, title: 'High-Protein Dinner', time: '20:30', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true },
+      { id: `rem_${Date.now()}_1`, userId: newUser.id, type: 'breakfast' as const, title: 'Nutritious Breakfast', time: '08:30', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true, message: 'Time to fuel up for the morning!' },
+      { id: `rem_${Date.now()}_2`, userId: newUser.id, type: 'water' as const, title: 'Hydration Check-in (500ml)', time: '11:00', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true, message: 'Drink a glass of fresh water.' },
+      { id: `rem_${Date.now()}_3`, userId: newUser.id, type: 'lunch' as const, title: 'Balanced Lunch', time: '13:00', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true, message: 'Time for your high-protein lunch.' },
+      { id: `rem_${Date.now()}_4`, userId: newUser.id, type: 'workout' as const, title: 'Daily Workout Session', time: '18:00', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], enabled: true, message: 'Ready for today’s movement session?' },
+      { id: `rem_${Date.now()}_5`, userId: newUser.id, type: 'dinner' as const, title: 'High-Protein Dinner', time: '20:30', repeatDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], enabled: true, message: 'Time for dinner and recovery.' },
     ];
     db.get().reminders.push(...defaultReminders);
 
@@ -99,14 +192,13 @@ router.post('/register', (req, res) => {
       id: `notif_${Date.now()}_1`,
       userId: newUser.id,
       title: 'Welcome to FitAI! 🌟',
-      message: 'Your personal fitness and nutrition engine is ready. Complete onboarding to personalize your plan.',
+      message: 'Your personal fitness and nutrition coach is ready. Complete onboarding to personalize your plan.',
       type: 'insight',
       isRead: false,
       createdAt: new Date().toISOString(),
     });
 
     db.save();
-
     const token = generateToken(newUser);
 
     return res.status(201).json({
@@ -140,7 +232,7 @@ router.post('/login', (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const validPassword = comparePassword(password, user.passwordHash);
+    const validPassword = comparePassword(String(password), user.passwordHash);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
@@ -191,21 +283,24 @@ router.post('/forgot-password', (req, res) => {
   const user = db.get().users.find(u => u.email.toLowerCase() === emailClean);
 
   if (!user) {
-    // Return friendly generic response
-    return res.json({ message: 'If an account exists with this email, a 6-digit reset code has been issued.', code: '849201' });
+    // Avoid user enumeration, return generic success message
+    return res.json({ message: 'If an account with this email exists, password reset instructions have been issued.' });
   }
 
-  // Generate 6 digit reset verification code
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  // Generate 6-digit secure code valid for 15 minutes
+  const code = generateSecureResetCode();
   resetTokens[emailClean] = {
     email: emailClean,
-    expires: Date.now() + 15 * 60 * 1000, // 15 mins
+    expiresAt: Date.now() + 15 * 60 * 1000,
     code,
   };
 
+  console.log(`[FitAI Auth Security] Password reset code for ${emailClean}: ${code} (expires in 15 mins)`);
+
   return res.json({
-    message: 'Reset code generated successfully.',
-    code, // Provided for smooth demonstration
+    message: 'A 6-digit verification reset code has been generated and logged.',
+    // For smooth user testing in dev environment, return the code
+    code: process.env.NODE_ENV !== 'production' ? code : undefined,
   });
 });
 
@@ -213,17 +308,18 @@ router.post('/forgot-password', (req, res) => {
 router.post('/reset-password', (req, res) => {
   const { email, code, newPassword } = req.body;
   if (!email || !code || !newPassword) {
-    return res.status(400).json({ error: 'Email, code, and new password are required' });
+    return res.status(400).json({ error: 'Email, verification code, and new password are required' });
+  }
+
+  if (String(newPassword).length < 6) {
+    return res.status(400).json({ error: 'New password must be at least 6 characters' });
   }
 
   const emailClean = String(email).trim().toLowerCase();
   const resetRecord = resetTokens[emailClean];
 
-  if (!resetRecord || resetRecord.code !== String(code).trim() || resetRecord.expires < Date.now()) {
-    // If standard demo reset fallback
-    if (code !== '849201') {
-      return res.status(400).json({ error: 'Invalid or expired reset code' });
-    }
+  if (!resetRecord || resetRecord.code !== String(code).trim() || resetRecord.expiresAt < Date.now()) {
+    return res.status(400).json({ error: 'Invalid or expired verification reset code' });
   }
 
   const user = db.get().users.find(u => u.email.toLowerCase() === emailClean);
@@ -231,7 +327,7 @@ router.post('/reset-password', (req, res) => {
     return res.status(404).json({ error: 'User not found' });
   }
 
-  user.passwordHash = hashPassword(newPassword);
+  user.passwordHash = hashPassword(String(newPassword));
   delete resetTokens[emailClean];
   db.save();
 

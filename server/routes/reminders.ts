@@ -14,26 +14,55 @@ router.get('/', authenticateToken, (req: AuthenticatedRequest, res) => {
 // POST /api/reminders
 router.post('/', authenticateToken, (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
-  const { type, title, time, repeatDays, enabled } = req.body;
+  const { type, title, time, repeatDays, enabled, message, intervalMinutes, quietHoursStart, quietHoursEnd } = req.body;
 
   if (!title || !time) {
     return res.status(400).json({ error: 'Title and time are required' });
   }
 
   const newReminder: ReminderItem = {
-    id: `rem_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+    id: `rem_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
     userId,
     type: type || 'custom',
-    title: title.trim(),
-    time: time.trim(),
+    title: String(title).trim(),
+    time: String(time).trim(),
     repeatDays: Array.isArray(repeatDays) && repeatDays.length > 0 ? repeatDays : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
     enabled: enabled !== undefined ? Boolean(enabled) : true,
+    message: message ? String(message).trim() : undefined,
+    intervalMinutes: intervalMinutes ? Number(intervalMinutes) : undefined,
+    quietHoursStart: quietHoursStart || undefined,
+    quietHoursEnd: quietHoursEnd || undefined,
   };
 
   db.get().reminders.push(newReminder);
   db.save();
 
   return res.status(201).json(newReminder);
+});
+
+// PUT /api/reminders/:id (Update reminder)
+router.put('/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
+  const id = req.params.id;
+  const { type, title, time, repeatDays, enabled, message, intervalMinutes, quietHoursStart, quietHoursEnd } = req.body;
+
+  const rem = db.get().reminders.find(r => r.id === id && r.userId === userId);
+  if (!rem) {
+    return res.status(404).json({ error: 'Reminder not found' });
+  }
+
+  if (title) rem.title = String(title).trim();
+  if (time) rem.time = String(time).trim();
+  if (type) rem.type = type;
+  if (Array.isArray(repeatDays)) rem.repeatDays = repeatDays;
+  if (enabled !== undefined) rem.enabled = Boolean(enabled);
+  if (message !== undefined) rem.message = message ? String(message).trim() : undefined;
+  if (intervalMinutes !== undefined) rem.intervalMinutes = intervalMinutes ? Number(intervalMinutes) : undefined;
+  if (quietHoursStart !== undefined) rem.quietHoursStart = quietHoursStart || undefined;
+  if (quietHoursEnd !== undefined) rem.quietHoursEnd = quietHoursEnd || undefined;
+
+  db.save();
+  return res.json(rem);
 });
 
 // PUT /api/reminders/:id/toggle
